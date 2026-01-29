@@ -142,6 +142,11 @@ object StandardEncodings {
             return zapfDingbatsEncoding[code]
         }
         
+        // Wingdings 符号字体编码
+        if (encodingName == "WingdingsEncoding" || encodingName.contains("Wingdings")) {
+            return wingdingsEncoding[code]
+        }
+        
         // TeX 数学字体编码
         if (encodingName == "CMREncoding" || encodingName.contains("CMR")) {
             return cmrEncoding[code]
@@ -211,6 +216,17 @@ object StandardEncodings {
             name.startsWith("CMTI") -> "CMMIEncoding"
             else -> null
         }
+    }
+    
+    /**
+     * 检测是否为 Wingdings 符号字体
+     * Wingdings 是 Microsoft 的符号字体系列，常用于 PowerPoint 等文档中的项目符号
+     */
+    fun isWingdingsFont(fontName: String): Boolean {
+        val name = fontName.uppercase()
+        return name.contains("WINGDINGS") ||
+               name.contains("WEBDINGS") ||
+               name.contains("WINGDING")
     }
     
     /**
@@ -1135,6 +1151,220 @@ object StandardEncodings {
         0x7D to '\u21D4', // ⇔ extensible
         0x7E to '\u2195', // ↕
         0x7F to '\u21D5', // ⇕
+    )
+    
+    /**
+     * Wingdings 编码
+     * Microsoft Wingdings 字体的字符映射
+     * 常用于 PowerPoint/Word 文档中的项目符号和装饰符号
+     * 
+     * 参考: https://en.wikipedia.org/wiki/Wingdings
+     */
+    private val wingdingsEncoding = mapOf(
+        // 书写工具 (0x21-0x29)
+        0x21 to '\u270F', // ✏ pencil
+        0x22 to '\u2702', // ✂ scissors
+        0x23 to '\u2701', // ✁ upper blade scissors
+        0x24 to '\u2704', // ✄ white scissors
+        0x25 to '\u260E', // ☎ telephone
+        0x26 to '\u2706', // ✆ telephone location sign
+        0x27 to '\u2709', // ✉ envelope
+        0x28 to '\u2707', // ✇ tape drive
+        0x29 to '\u275D', // ❝ heavy double comma quotation mark ornament
+        0x2A to '\u275E', // ❞ heavy double turned comma quotation mark ornament
+        
+        // 手势 (0x2B-0x30)
+        0x2B to '\u270C', // ✌ victory hand
+        0x2C to '\u270D', // ✍ writing hand
+        0x2D to '\u270E', // ✎ lower right pencil
+        0x2E to '\u270A', // ✊ raised fist
+        0x2F to '\u270B', // ✋ raised hand
+        0x30 to '\u261C', // ☜ white left pointing index
+        0x31 to '\u261E', // ☞ white right pointing index
+        0x32 to '\u261D', // ☝ white up pointing index
+        0x33 to '\u261F', // ☟ white down pointing index
+        
+        // 手型指示 (0x34-0x37)
+        0x34 to '\u270B', // ✋ raised hand (variant)
+        0x35 to '\u263A', // ☺ white smiling face
+        0x36 to '\u2639', // ☹ white frowning face
+        0x37 to '\u263B', // ☻ black smiling face
+        
+        // 炸弹/骷髅 (0x38-0x3F)
+        0x38 to '\u2620', // ☠ skull and crossbones
+        0x39 to '\u2690', // ⚐ white flag
+        0x3A to '\u2691', // ⚑ black flag
+        0x3B to '\u2708', // ✈ airplane
+        0x3C to '\u263C', // ☼ white sun with rays
+        0x3D to '\u2602', // ☂ umbrella
+        0x3E to '\u2744', // ❄ snowflake
+        0x3F to '\u271E', // ✞ shadowed white latin cross
+        
+        // 宗教符号 (0x40-0x47)
+        0x40 to '\u271F', // ✟ outlined latin cross
+        0x41 to '\u2720', // ✠ maltese cross
+        0x42 to '\u2721', // ✡ star of david
+        0x43 to '\u262A', // ☪ star and crescent
+        0x44 to '\u262F', // ☯ yin yang
+        0x45 to '\u2638', // ☸ wheel of dharma
+        0x46 to '\u2648', // ♈ aries
+        0x47 to '\u2649', // ♉ taurus
+        
+        // 星座 (0x48-0x53)
+        0x48 to '\u264A', // ♊ gemini
+        0x49 to '\u264B', // ♋ cancer
+        0x4A to '\u264C', // ♌ leo
+        0x4B to '\u264D', // ♍ virgo
+        0x4C to '\u264E', // ♎ libra
+        0x4D to '\u264F', // ♏ scorpio
+        0x4E to '\u2650', // ♐ sagittarius
+        0x4F to '\u2651', // ♑ capricorn
+        0x50 to '\u2652', // ♒ aquarius
+        0x51 to '\u2653', // ♓ pisces
+        0x52 to '\u0026', // & ampersand
+        0x53 to '\u0026', // & ampersand (variant)
+        
+        // 圆圈数字 (0x54-0x5D)
+        0x54 to '\u2460', // ① circled digit one
+        0x55 to '\u2461', // ② circled digit two
+        0x56 to '\u2462', // ③ circled digit three
+        0x57 to '\u2463', // ④ circled digit four
+        0x58 to '\u2464', // ⑤ circled digit five
+        0x59 to '\u2465', // ⑥ circled digit six
+        0x5A to '\u2466', // ⑦ circled digit seven
+        0x5B to '\u2467', // ⑧ circled digit eight
+        0x5C to '\u2468', // ⑨ circled digit nine
+        0x5D to '\u2469', // ⑩ circled digit ten
+        
+        // 负圆圈数字 (0x5E-0x67)
+        0x5E to '\u2776', // ❶ dingbat negative circled digit one
+        0x5F to '\u2777', // ❷ dingbat negative circled digit two
+        0x60 to '\u2778', // ❸ dingbat negative circled digit three
+        0x61 to '\u2779', // ❹ dingbat negative circled digit four
+        0x62 to '\u277A', // ❺ dingbat negative circled digit five
+        0x63 to '\u277B', // ❻ dingbat negative circled digit six
+        0x64 to '\u277C', // ❼ dingbat negative circled digit seven
+        0x65 to '\u277D', // ❽ dingbat negative circled digit eight
+        0x66 to '\u277E', // ❾ dingbat negative circled digit nine
+        0x67 to '\u277F', // ❿ dingbat negative circled digit ten
+        
+        // 项目符号 - 圆形 (0x6C-0x6F)
+        0x6C to '\u25CF', // ● black circle
+        0x6D to '\u274D', // ❍ shadowed white circle
+        0x6E to '\u25A0', // ■ black square
+        0x6F to '\u25A1', // □ white square
+        
+        // 项目符号 - 方形/菱形 (0x70-0x77)
+        0x70 to '\u2751', // ❑ lower right shadowed white square
+        0x71 to '\u2752', // ❒ upper right shadowed white square
+        0x72 to '\u2B27', // ⬧ black medium lozenge
+        0x73 to '\u29EB', // ⧫ black lozenge
+        0x74 to '\u25C6', // ◆ black diamond
+        0x75 to '\u2756', // ❖ black diamond minus white x
+        0x76 to '\u2318', // ⌘ place of interest sign
+        0x77 to '\u2714', // ✔ heavy check mark
+        
+        // 复选框和 X (0x78-0x7F)
+        0x78 to '\u2718', // ✘ heavy ballot x
+        0x79 to '\u2715', // ✕ multiplication x
+        0x7A to '\u2716', // ✖ heavy multiplication x
+        0x7B to '\u2717', // ✗ ballot x
+        0x7C to '\u2713', // ✓ check mark
+        0x7D to '\u2612', // ☒ ballot box with x
+        0x7E to '\u2611', // ☑ ballot box with check
+        0x7F to '\u2610', // ☐ ballot box
+        
+        // 星形 (0x80-0x8F)
+        0x80 to '\u2605', // ★ black star
+        0x81 to '\u2606', // ☆ white star
+        0x82 to '\u2736', // ✶ six pointed black star
+        0x83 to '\u2735', // ✵ eight pointed pinwheel star
+        0x84 to '\u2739', // ✹ twelve pointed black star
+        0x85 to '\u2734', // ✴ eight pointed black star
+        0x86 to '\u2733', // ✳ eight spoked asterisk
+        0x87 to '\u2747', // ❇ sparkle
+        0x88 to '\u2748', // ❈ heavy sparkle
+        0x89 to '\u274A', // ❊ eight teardrop-spoked propeller asterisk
+        0x8A to '\u274B', // ❋ heavy eight teardrop-spoked propeller asterisk
+        
+        // 更多符号 (0x8B-0x97)
+        0x8B to '\u2726', // ✦ black four pointed star
+        0x8C to '\u2725', // ✥ four club-spoked asterisk
+        0x8D to '\u2749', // ❉ balloon-spoked asterisk
+        0x8E to '\u2724', // ✤ heavy four balloon-spoked asterisk
+        0x8F to '\u2727', // ✧ white four pointed star
+        0x90 to '\u2742', // ❂ circled open centre eight pointed star
+        0x91 to '\u2743', // ❃ heavy teardrop-spoked asterisk
+        0x92 to '\u2744', // ❄ snowflake
+        0x93 to '\u2745', // ❅ tight trifoliate snowflake
+        0x94 to '\u2746', // ❆ heavy chevron snowflake
+        
+        // 箭头 - 常用项目符号 (0xD5-0xEF)
+        0xD5 to '\u232B', // ⌫ erase to the left
+        0xD6 to '\u2326', // ⌦ erase to the right
+        0xD7 to '\u27A2', // ➢ three-d top-lighted rightwards arrowhead
+        0xD8 to '\u27A4', // ➤ black rightwards arrowhead (常用项目符号)
+        0xD9 to '\u27A6', // ➦ heavy round-tipped rightwards arrow
+        0xDA to '\u27A8', // ➨ heavy concave-pointed black rightwards arrow
+        0xDB to '\u27A1', // ➡ black rightwards arrow
+        0xDC to '\u2794', // ➔ heavy wide-headed rightwards arrow (常用项目符号)
+        0xDD to '\u27A7', // ➧ squat black rightwards arrow
+        0xDE to '\u27A9', // ➩ white concave-sided diamond
+        0xDF to '\u27AA', // ➪ black curved downwards and rightwards arrow
+        0xE0 to '\u27AB', // ➫ black curved upwards and rightwards arrow
+        0xE1 to '\u27AC', // ➬ squat white rightwards arrow
+        0xE2 to '\u27AD', // ➭ white concave-sided diamond arrow
+        0xE3 to '\u27AE', // ➮ notched upper right-shadowed white rightwards arrow
+        0xE4 to '\u27AF', // ➯ curly loop
+        
+        // 更多箭头 (0xE5-0xEF)
+        0xE5 to '\u27B1', // ➱ notched lower right-shadowed white rightwards arrow
+        0xE6 to '\u27B2', // ➲ circled heavy white rightwards arrow
+        0xE7 to '\u27B3', // ➳ white-feathered rightwards arrow
+        0xE8 to '\u27B4', // ➴ black-feathered south east arrow
+        0xE9 to '\u27B5', // ➵ black-feathered rightwards arrow
+        0xEA to '\u27B6', // ➶ black-feathered north east arrow
+        0xEB to '\u27B7', // ➷ heavy black-feathered south east arrow
+        0xEC to '\u27B8', // ➸ heavy black-feathered rightwards arrow
+        0xED to '\u27B9', // ➹ heavy black-feathered north east arrow
+        0xEE to '\u27BA', // ➺ teardrop-barbed rightwards arrow
+        0xEF to '\u27BB', // ➻ heavy teardrop-shanked rightwards arrow
+        
+        // 方向箭头 (0xF0-0xFB)
+        0xF0 to '\u27BC', // ➼ wedge-tailed rightwards arrow
+        0xF1 to '\u27BD', // ➽ heavy wedge-tailed rightwards arrow
+        0xF2 to '\u27BE', // ➾ open-outlined rightwards arrow
+        0xF3 to '\u2190', // ← leftwards arrow
+        0xF4 to '\u2191', // ↑ upwards arrow
+        0xF5 to '\u2192', // → rightwards arrow
+        0xF6 to '\u2193', // ↓ downwards arrow
+        0xF7 to '\u2196', // ↖ north west arrow
+        0xF8 to '\u2197', // ↗ north east arrow
+        0xF9 to '\u2198', // ↘ south east arrow
+        0xFA to '\u2199', // ↙ south west arrow
+        0xFB to '\u21D4', // ⇔ left right double arrow
+        0xFC to '\u21D2', // ⇒ rightwards double arrow
+        0xFD to '\u21D1', // ⇑ upwards double arrow
+        0xFE to '\u21D0', // ⇐ leftwards double arrow
+        0xFF to '\u21D3', // ⇓ downwards double arrow
+        
+        // 边框/表格元素 (0x9A-0xA7)
+        0x9A to '\u25B2', // ▲ black up-pointing triangle
+        0x9B to '\u25BC', // ▼ black down-pointing triangle
+        0x9C to '\u25C0', // ◀ black left-pointing triangle
+        0x9D to '\u25B6', // ▶ black right-pointing triangle
+        0x9E to '\u25B3', // △ white up-pointing triangle
+        0x9F to '\u25BD', // ▽ white down-pointing triangle
+        0xA0 to '\u25C1', // ◁ white left-pointing triangle
+        0xA1 to '\u25B7', // ▷ white right-pointing triangle
+        
+        // 几何形状 (0xA2-0xD4)
+        0xA2 to '\u25C9', // ◉ fisheye
+        0xA3 to '\u25CE', // ◎ bullseye
+        0xA4 to '\u25AA', // ▪ black small square
+        0xA5 to '\u25FB', // ◻ white medium square
+        0xA6 to '\u25AB', // ▫ white small square
+        0xA7 to '\u2B1B', // ⬛ black large square
     )
 }
 

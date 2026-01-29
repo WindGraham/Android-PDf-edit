@@ -23,11 +23,13 @@ object FontAssetManager {
     private const val FONT_SERIF_CJK = "fonts/NotoSerifCJK-Regular.ttc"
     private const val FONT_SANS_CJK = "fonts/NotoSansCJK-Regular.ttc"
     private const val FONT_MATH = "fonts/NotoSansMath-Regular.ttf"
+    private const val FONT_SYMBOLS = "fonts/NotoSansSymbols2-Regular.ttf"
     
     // 字体缓存
     private var serifCJKTypeface: Typeface? = null
     private var sansCJKTypeface: Typeface? = null
     private var mathTypeface: Typeface? = null
+    private var symbolsTypeface: Typeface? = null
     
     // 初始化状态
     private var initialized = false
@@ -91,6 +93,22 @@ object FontAssetManager {
     }
     
     /**
+     * 获取符号字体 (Dingbats/Wingdings 等)
+     * 
+     * 用于渲染 PDF 中的装饰符号，如：
+     * - Wingdings 符号（箭头 ➔、复选框 ☐、勾选 ✔ 等）
+     * - ZapfDingbats 符号
+     * - Unicode Dingbats 区域 (U+2700-U+27BF)
+     * 如果字体文件不存在或加载失败，返回系统默认字体。
+     */
+    fun getSymbolsFont(): Typeface {
+        if (symbolsTypeface == null) {
+            symbolsTypeface = loadTypeface(FONT_SYMBOLS)
+        }
+        return symbolsTypeface ?: Typeface.DEFAULT
+    }
+    
+    /**
      * 根据字体类型获取对应的 Typeface
      * 
      * @param fontType 字体类型
@@ -101,6 +119,7 @@ object FontAssetManager {
             FontType.SERIF_CJK -> getSerifCJK()
             FontType.SANS_CJK -> getSansCJK()
             FontType.MATH -> getMathFont()
+            FontType.SYMBOLS -> getSymbolsFont()
             FontType.SERIF -> Typeface.SERIF
             FontType.SANS_SERIF -> Typeface.SANS_SERIF
             FontType.MONOSPACE -> Typeface.MONOSPACE
@@ -146,6 +165,10 @@ object FontAssetManager {
         return getMathFont() != Typeface.DEFAULT
     }
     
+    fun isSymbolsFontAvailable(): Boolean {
+        return getSymbolsFont() != Typeface.DEFAULT
+    }
+    
     /**
      * 预加载所有字体
      * 
@@ -155,6 +178,7 @@ object FontAssetManager {
         getSerifCJK()
         getSansCJK()
         getMathFont()
+        getSymbolsFont()
         Log.d(TAG, "All fonts preloaded")
     }
     
@@ -167,6 +191,7 @@ object FontAssetManager {
         serifCJKTypeface = null
         sansCJKTypeface = null
         mathTypeface = null
+        symbolsTypeface = null
         Log.d(TAG, "Font cache released")
     }
     
@@ -177,6 +202,7 @@ object FontAssetManager {
         SERIF_CJK,      // 中文衬线（宋体）
         SANS_CJK,       // 中文无衬线（黑体）
         MATH,           // 数学符号
+        SYMBOLS,        // 装饰符号 (Dingbats/Wingdings)
         SERIF,          // 西文衬线
         SANS_SERIF,     // 西文无衬线
         MONOSPACE,      // 等宽

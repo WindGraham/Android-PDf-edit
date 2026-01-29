@@ -478,6 +478,15 @@ class FontHandler(private val document: PdfDocument) {
             }
         }
         
+        // 检测 Wingdings 字体 - 使用内置 WingdingsEncoding
+        // Wingdings 是 Microsoft 的符号字体，常用于 PowerPoint 项目符号
+        if (StandardEncodings.isWingdingsFont(baseFont)) {
+            // Wingdings 字体使用专用编码
+            if (fontDict["Encoding"] == null) {
+                return FontEncoding.Named("WingdingsEncoding")
+            }
+        }
+        
         // 检测 TeX 数学字体 - 使用专用编码
         // Computer Modern 系列：CMMI (斜体)、CMSY (符号)、CMEX (大型符号)、CMR (罗马)
         if (StandardEncodings.isTeXMathFont(baseFont)) {

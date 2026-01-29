@@ -22,6 +22,16 @@
 - **用途**: 渲染 PDF 中的数学公式、希腊字母、数学符号等
 - **大小**: ~578KB
 
+### 4. 装饰符号字体 (Dingbats)
+- **文件名**: `NotoSansSymbols2-Regular.ttf`
+- **来源**: Google Fonts / https://github.com/notofonts/symbols
+- **用途**: 渲染 PDF 中的装饰符号，包括：
+  - Wingdings 符号（箭头 ➔、复选框 ☐、勾选 ✔ 等）
+  - ZapfDingbats 符号
+  - Unicode Dingbats 区域 (U+2700-U+27BF)
+  - 其他装饰性符号（星形 ★、手势 ☞ 等）
+- **大小**: ~1.2MB
+
 ## 字体子集化（可选）
 
 完整的 CJK 字体文件较大（约 10-20MB），如果需要减小应用体积，可以使用字体子集化工具：
@@ -55,7 +65,8 @@ fonts/
 ├── README.md                      (本文件)
 ├── NotoSerifCJK-Regular.ttc       (中文衬线字体 ~26MB)
 ├── NotoSansCJK-Regular.ttc        (中文无衬线字体 ~19MB)
-└── NotoSansMath-Regular.ttf       (数学符号字体 ~578KB)
+├── NotoSansMath-Regular.ttf       (数学符号字体 ~578KB)
+└── NotoSansSymbols2-Regular.ttf   (装饰符号字体 ~1.2MB)
 ```
 
 **注意**: TTC (TrueType Collection) 格式包含多种语言变体（简体中文、繁体中文、日文、韩文），

@@ -3361,12 +3361,20 @@ object FontFallback {
                 // 使用应用内打包的中文字体
                 FontAssetManager.getSansCJK()
             }
+            CharacterType.DINGBATS -> {
+                // Dingbats 符号使用符号字体 (Wingdings, ZapfDingbats 等)
+                FontAssetManager.getSymbolsFont()
+            }
             CharacterType.EMOJI -> {
                 // 表情符号使用系统字体
                 Typeface.DEFAULT
             }
-            CharacterType.SYMBOL, CharacterType.MATH -> {
-                // 数学符号和其他符号使用数学字体
+            CharacterType.SYMBOL -> {
+                // 其他符号使用符号字体
+                FontAssetManager.getSymbolsFont()
+            }
+            CharacterType.MATH -> {
+                // 数学符号使用数学字体
                 FontAssetManager.getMathFont()
             }
             CharacterType.GREEK -> {
@@ -3388,6 +3396,7 @@ object FontFallback {
         CJK_KOREAN,
         CJK_GENERIC,
         EMOJI,
+        DINGBATS,   // Dingbats 符号 (Wingdings, ZapfDingbats 等)
         SYMBOL,
         MATH,       // 数学符号
         GREEK,      // 希腊字母
@@ -3404,6 +3413,7 @@ object FontFallback {
         var japaneseKanaCount = 0
         var koreanCount = 0
         var emojiCount = 0
+        var dingbatsCount = 0  // Dingbats 符号计数
         var symbolCount = 0
         var mathCount = 0
         var greekCount = 0
@@ -3445,10 +3455,14 @@ object FontFallback {
                 codePoint in 0x2100..0x214F -> { // Letterlike Symbols
                     mathCount++
                 }
-                // 表情符号
-                codePoint in 0x1F300..0x1F9FF ||
-                codePoint in 0x2600..0x26FF ||
+                // Dingbats 符号 (U+2700-U+27BF) - Wingdings, ZapfDingbats 等装饰符号
+                // 包含箭头 ➔、复选框 ☐、勾选 ✔、✕、✖ 等常用项目符号
                 codePoint in 0x2700..0x27BF -> {
+                    dingbatsCount++
+                }
+                // 表情符号 (不包括 Dingbats)
+                codePoint in 0x1F300..0x1F9FF ||
+                codePoint in 0x2600..0x26FF -> {
                     emojiCount++
                 }
                 // 其他技术符号
@@ -3466,6 +3480,7 @@ object FontFallback {
         }
         
         return when {
+            dingbatsCount > 0 -> CharacterType.DINGBATS
             emojiCount > 0 -> CharacterType.EMOJI
             japaneseKanaCount > 0 -> CharacterType.CJK_JAPANESE
             koreanCount > 0 -> CharacterType.CJK_KOREAN
