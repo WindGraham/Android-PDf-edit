@@ -6,6 +6,7 @@ import com.pdfcore.content.ContentParser
 import com.pdfcore.font.FontHandler
 import com.pdfcore.font.PdfFont
 import com.pdfcore.font.SimpleFont
+import com.pdfcore.font.StandardEncodings
 import com.pdfcore.function.PdfFunction
 import com.pdfcore.model.*
 import com.pdfcore.parser.StreamFilters
@@ -829,11 +830,43 @@ private class RenderState(
     
     /**
      * 获取着色流
+     * 对于 ShadingType 4-7，需要从原始的 Shading 对象中获取流数据
      */
     private fun getShadingStream(shadingDict: PdfDictionary): PdfStream? {
-        // 着色字典可能包含流数据
-        return null // 占位，实际从字典的流部分获取
+        // 首先检查是否有缓存的流引用
+        val cachedStream = shadingStreamCache[System.identityHashCode(shadingDict)]
+        if (cachedStream != null) {
+            return cachedStream
+        }
+        
+        // 如果没有缓存，尝试从资源中重新获取
+        // 注意：这种情况下可能找不到流，因为 shadingDict 可能已经是从流中提取的
+        val shadingResources = when (val sh = resources["Shading"]) {
+            is PdfDictionary -> sh
+            is PdfIndirectRef -> document.getObject(sh) as? PdfDictionary
+            else -> null
+        } ?: return null
+        
+        // 遍历所有着色资源，查找匹配的流
+        for ((_, value) in shadingResources) {
+            val stream = when (value) {
+                is PdfStream -> if (value.dict == shadingDict) value else null
+                is PdfIndirectRef -> {
+                    val obj = document.getObject(value)
+                    if (obj is PdfStream && obj.dict == shadingDict) obj else null
+                }
+                else -> null
+            }
+            if (stream != null) {
+                return stream
+            }
+        }
+        
+        return null
     }
+    
+    // 着色流缓存：用于存储从资源中获取的 PdfStream
+    private val shadingStreamCache = mutableMapOf<Int, PdfStream>()
     
     /**
      * 颜色值转换为颜色
@@ -1193,21 +1226,32 @@ private class RenderState(
     
     /**
      * 获取 Shading 字典
+     * 同时缓存 PdfStream 对象以便后续获取流数据
      */
     private fun getShading(name: String): PdfDictionary? {
-        val shadingDict = when (val sh = resources["Shading"]) {
+        val shadingResources = when (val sh = resources["Shading"]) {
             is PdfDictionary -> sh
             is PdfIndirectRef -> document.getObject(sh) as? PdfDictionary
             else -> null
         } ?: return null
         
-        return when (val shading = shadingDict[name]) {
-            is PdfDictionary -> shading
-            is PdfStream -> shading.dict
+        val shadingObj = shadingResources[name] ?: return null
+        
+        return when (shadingObj) {
+            is PdfDictionary -> shadingObj
+            is PdfStream -> {
+                // 缓存流对象，以便 getShadingStream() 可以获取
+                shadingStreamCache[System.identityHashCode(shadingObj.dict)] = shadingObj
+                shadingObj.dict
+            }
             is PdfIndirectRef -> {
-                when (val obj = document.getObject(shading)) {
+                when (val obj = document.getObject(shadingObj)) {
                     is PdfDictionary -> obj
-                    is PdfStream -> obj.dict
+                    is PdfStream -> {
+                        // 缓存流对象
+                        shadingStreamCache[System.identityHashCode(obj.dict)] = obj
+                        obj.dict
+                    }
                     else -> null
                 }
             }
@@ -1982,10 +2026,8 @@ private class RenderState(
         canvas.scale(1f, -1f)
         canvas.translate(0f, currentState.rise)
         
-        canvas.drawText(text, 0f, 0f, textPaint)
-        
-        // 更新文本位置
-        val width = textPaint.measureText(text)
+        // 使用字体回退机制绘制文本
+        val width = drawTextWithFallback(text, 0f, 0f, textPaint)
         
         canvas.restore()
         
@@ -2007,9 +2049,9 @@ private class RenderState(
                     canvas.scale(1f, -1f)
                     canvas.translate(0f, currentState.rise)
                     
-                    canvas.drawText(text, 0f, 0f, textPaint)
+                    // 使用字体回退机制绘制文本
+                    val width = drawTextWithFallback(text, 0f, 0f, textPaint)
                     
-                    val width = textPaint.measureText(text)
                     canvas.restore()
                     
                     textMatrix.preTranslate(width / currentState.hScale, 0f)
@@ -2021,6 +2063,78 @@ private class RenderState(
                 else -> { /* ignore other types */ }
             }
         }
+    }
+    
+    /**
+     * 使用字体回退机制绘制文本
+     * 对于当前字体无法渲染的字符，使用系统 CJK 字体回退
+     * 
+     * @return 绘制的文本总宽度
+     */
+    private fun drawTextWithFallback(text: String, x: Float, y: Float, paint: Paint): Float {
+        if (text.isEmpty()) return 0f
+        
+        // 首先转换 PUA 字符为标准 Unicode（作为安全层）
+        val convertedText = convertPUAInText(text)
+        
+        // 检查是否需要字体回退
+        val needsFallback = FontFallback.needsFallback(convertedText, paint)
+        
+        if (!needsFallback) {
+            // 不需要回退，直接绘制
+            canvas.drawText(convertedText, x, y, paint)
+            return paint.measureText(convertedText)
+        }
+        
+        // 需要回退：分段绘制文本
+        val segments = FontFallback.segmentText(convertedText, paint)
+        var currentX = x
+        var totalWidth = 0f
+        
+        for (segment in segments) {
+            if (segment.useFallback) {
+                // 使用回退字体绘制
+                val fallbackPaint = Paint(paint)
+                fallbackPaint.typeface = FontFallback.getFallbackTypeface(segment.text)
+                canvas.drawText(segment.text, currentX, y, fallbackPaint)
+                val width = fallbackPaint.measureText(segment.text)
+                currentX += width
+                totalWidth += width
+            } else {
+                // 使用当前字体绘制
+                canvas.drawText(segment.text, currentX, y, paint)
+                val width = paint.measureText(segment.text)
+                currentX += width
+                totalWidth += width
+            }
+        }
+        
+        return totalWidth
+    }
+    
+    /**
+     * 将文本中的 PUA 字符 (U+F000-U+F0FF) 转换为标准 Unicode
+     * 这是一个安全层，确保即使解码层没有转换，渲染层也会处理
+     */
+    private fun convertPUAInText(text: String): String {
+        var hasChanged = false
+        val sb = StringBuilder(text.length)
+        
+        for (char in text) {
+            if (char.code in 0xF000..0xF0FF) {
+                val converted = StandardEncodings.convertPUAToUnicode(char)
+                if (converted != null) {
+                    sb.append(converted)
+                    hasChanged = true
+                } else {
+                    sb.append(char)
+                }
+            } else {
+                sb.append(char)
+            }
+        }
+        
+        return if (hasChanged) sb.toString() else text
     }
     
     private fun showTextNextLine(operands: List<PdfObject>) {
@@ -2603,11 +2717,26 @@ private sealed class ColorSpaceInfo {
  * 
  * 将 PDF 标准 14 字体（以及常见字体名称）映射到 Android 系统字体
  * 根据 PDF 32000-1:2008 标准 9.6.2.2 节
+ * 
+ * 支持:
+ * - PDF 标准 14 字体
+ * - CJK (中日韩) 字体
+ * - 嵌入字体
+ * - 字体回退机制
  */
 object FontMapper {
     
     // 嵌入字体 Typeface 缓存
     private val embeddedTypefaceCache = mutableMapOf<String, Typeface?>()
+    
+    // CJK 字体类型
+    enum class CJKFontType {
+        SIMPLIFIED_CHINESE,  // 简体中文
+        TRADITIONAL_CHINESE, // 繁体中文
+        JAPANESE,            // 日文
+        KOREAN,              // 韩文
+        NONE                 // 非 CJK 字体
+    }
     
     /**
      * 从嵌入字体数据创建 Typeface
@@ -2651,6 +2780,175 @@ object FontMapper {
     }
     
     /**
+     * 检测 CJK 字体类型
+     */
+    fun detectCJKType(baseFont: String): CJKFontType {
+        val name = baseFont.lowercase()
+        
+        // 简体中文字体
+        if (name.contains("simsun") ||      // 宋体 (Windows)
+            name.contains("simhei") ||       // 黑体 (Windows)
+            name.contains("simkai") ||       // 楷体 (Windows)
+            name.contains("simfang") ||      // 仿宋 (Windows)
+            name.contains("fangsong") ||     // 仿宋
+            name.contains("stsong") ||       // 华文宋体
+            name.contains("stxihei") ||      // 华文细黑
+            name.contains("stkaiti") ||      // 华文楷体
+            name.contains("stfangsong") ||   // 华文仿宋
+            name.contains("stzhongsong") ||  // 华文中宋
+            name.contains("stheiti") ||      // 华文黑体
+            name.contains("nsimsun") ||      // 新宋体
+            name.contains("yahei") ||        // 微软雅黑
+            name.contains("dengxian") ||     // 等线
+            name.contains("fzshusong") ||    // 方正书宋
+            name.contains("fzfangsong") ||   // 方正仿宋
+            name.contains("fzheiti") ||      // 方正黑体
+            name.contains("fzkaiti") ||      // 方正楷体
+            name.contains("adobe-gb") ||     // Adobe GB 字体集
+            name.contains("adobesongstd") || // Adobe 宋体
+            name.contains("adobeheitistd") ||// Adobe 黑体
+            name.contains("sourcehansans-sc") ||  // 思源黑体 简体
+            name.contains("sourcehanserif-sc") || // 思源宋体 简体
+            name.contains("notosanssc") ||   // Noto Sans 简体中文
+            name.contains("notoserifsc") ||  // Noto Serif 简体中文
+            name.contains("gb1") ||          // GB1 字符集
+            name.contains("gbk") ||          // GBK 编码
+            name.contains("gb2312") ||       // GB2312 编码
+            name.contains("hanyisong") ||    // 汉仪宋体
+            name.contains("hanyihei")) {     // 汉仪黑体
+            return CJKFontType.SIMPLIFIED_CHINESE
+        }
+        
+        // 繁体中文字体
+        if (name.contains("mingliu") ||      // 细明体 (Windows)
+            name.contains("pmingliu") ||     // 新细明体
+            name.contains("dfkai") ||        // 标楷体
+            name.contains("kaiu") ||         // 标楷体
+            name.contains("msong") ||        // 明體
+            name.contains("mhei") ||         // 黑體
+            name.contains("lisong") ||       // 隸書
+            name.contains("lihei") ||        // 儷黑
+            name.contains("apple lisong") || // Apple 隸書
+            name.contains("heiti tc") ||     // 黑體-繁
+            name.contains("songti tc") ||    // 宋體-繁
+            name.contains("adobe-cns") ||    // Adobe CNS 字体集
+            name.contains("cns1") ||         // CNS1 字符集
+            name.contains("big5") ||         // Big5 编码
+            name.contains("sourcehansans-tc") ||  // 思源黑体 繁体
+            name.contains("sourcehanserif-tc") || // 思源宋体 繁体
+            name.contains("notosanstc") ||   // Noto Sans 繁体中文
+            name.contains("notoseriftc")) {  // Noto Serif 繁体中文
+            return CJKFontType.TRADITIONAL_CHINESE
+        }
+        
+        // 日文字体
+        if (name.contains("mincho") ||       // 明朝体
+            name.contains("gothic") && !name.contains("century") || // ゴシック体
+            name.contains("meiryo") ||       // メイリオ
+            name.contains("msgothic") ||     // MS ゴシック
+            name.contains("msmincho") ||     // MS 明朝
+            name.contains("yugo") ||         // 游ゴシック
+            name.contains("yumincho") ||     // 游明朝
+            name.contains("hiragino") ||     // ヒラギノ
+            name.contains("kozuka") ||       // 小塚
+            name.contains("kozgo") ||        // 小塚ゴシック
+            name.contains("kozmin") ||       // 小塚明朝
+            name.contains("ryumin") ||       // リュウミン
+            name.contains("adobe-japan") ||  // Adobe Japan 字体集
+            name.contains("japan1") ||       // Japan1 字符集
+            name.contains("ipagothic") ||    // IPA ゴシック
+            name.contains("ipamincho") ||    // IPA 明朝
+            name.contains("sourcehansans-jp") ||  // 思源黑体 日文
+            name.contains("sourcehanserif-jp") || // 思源宋体 日文
+            name.contains("notosansjp") ||   // Noto Sans 日文
+            name.contains("notoserifjp")) {  // Noto Serif 日文
+            return CJKFontType.JAPANESE
+        }
+        
+        // 韩文字体
+        if (name.contains("batang") ||       // 바탕
+            name.contains("dotum") ||        // 돋움
+            name.contains("gulim") ||        // 굴림
+            name.contains("gungsuh") ||      // 궁서
+            name.contains("malgun") ||       // 맑은 고딕
+            name.contains("nanum") ||        // 나눔
+            name.contains("adobe-korea") ||  // Adobe Korea 字体集
+            name.contains("korea1") ||       // Korea1 字符集
+            name.contains("ksc") ||          // KSC 编码
+            name.contains("sourcehansans-kr") ||  // 思源黑体 韩文
+            name.contains("sourcehanserif-kr") || // 思源宋体 韩文
+            name.contains("notosanskr") ||   // Noto Sans 韩文
+            name.contains("notoserifkr")) {  // Noto Serif 韩文
+            return CJKFontType.KOREAN
+        }
+        
+        // 通用 CJK 字体 (多语言支持)
+        if (name.contains("notosanscjk") ||  // Noto Sans CJK
+            name.contains("notoserifcjk") || // Noto Serif CJK
+            name.contains("sourcehansans") ||// 思源黑体 (通用)
+            name.contains("sourcehanserif") ||// 思源宋体 (通用)
+            name.contains("cjk")) {
+            // 默认返回简体中文
+            return CJKFontType.SIMPLIFIED_CHINESE
+        }
+        
+        return CJKFontType.NONE
+    }
+    
+    /**
+     * 判断是否为 CJK 字体
+     */
+    fun isCJKFont(baseFont: String): Boolean {
+        return detectCJKType(baseFont) != CJKFontType.NONE
+    }
+    
+    /**
+     * 获取 CJK 字体的推荐样式 (衬线/无衬线)
+     */
+    fun getCJKFontStyle(baseFont: String): Typeface {
+        val name = baseFont.lowercase()
+        
+        // 衬线体 (宋体/明朝体)
+        val isSerif = name.contains("song") ||
+                      name.contains("ming") ||
+                      name.contains("mincho") ||
+                      name.contains("batang") ||
+                      name.contains("serif") ||
+                      name.contains("kai") ||
+                      name.contains("fang") ||
+                      name.contains("lisong") ||
+                      name.contains("gungsuh")
+        
+        // 无衬线体 (黑体/哥特体)
+        val isSansSerif = name.contains("hei") ||
+                         name.contains("gothic") ||
+                         name.contains("dotum") ||
+                         name.contains("gulim") ||
+                         name.contains("malgun") ||
+                         name.contains("meiryo") ||
+                         name.contains("yahei") ||
+                         name.contains("dengxian") ||
+                         name.contains("sans")
+        
+        val family = when {
+            isSerif -> Typeface.SERIF
+            isSansSerif -> Typeface.SANS_SERIF
+            else -> Typeface.DEFAULT
+        }
+        
+        // 检测粗体
+        val isBold = name.contains("bold") ||
+                     name.contains("heavy") ||
+                     name.contains("black") ||
+                     name.contains("-b") ||
+                     name.endsWith("bd")
+        
+        val style = if (isBold) Typeface.BOLD else Typeface.NORMAL
+        
+        return Typeface.create(family, style)
+    }
+    
+    /**
      * 将 PDF 字体的 BaseFont 名称映射到 Android Typeface
      * 
      * 支持的 PDF 标准 14 字体:
@@ -2662,6 +2960,11 @@ object FontMapper {
     fun mapToTypeface(baseFont: String): Typeface {
         val name = baseFont.lowercase()
         
+        // 首先检查是否为 CJK 字体
+        if (isCJKFont(baseFont)) {
+            return getCJKFontStyle(baseFont)
+        }
+        
         // 确定字体家族
         val family = when {
             // 衬线字体 (Serif)
@@ -2671,6 +2974,9 @@ object FontMapper {
             name.contains("garamond") -> Typeface.SERIF
             name.contains("bookman") -> Typeface.SERIF
             name.contains("cambria") -> Typeface.SERIF
+            name.contains("century") -> Typeface.SERIF
+            name.contains("bodoni") -> Typeface.SERIF
+            name.contains("baskerville") -> Typeface.SERIF
             
             // 无衬线字体 (Sans-serif)
             name.contains("helvetica") -> Typeface.SANS_SERIF
@@ -2681,7 +2987,12 @@ object FontMapper {
             name.contains("segoe") -> Typeface.SANS_SERIF
             name.contains("roboto") -> Typeface.SANS_SERIF
             name.contains("opensans") -> Typeface.SANS_SERIF
+            name.contains("noto sans") -> Typeface.SANS_SERIF
             name.contains("sans") -> Typeface.SANS_SERIF
+            name.contains("futura") -> Typeface.SANS_SERIF
+            name.contains("avenir") -> Typeface.SANS_SERIF
+            name.contains("franklin") -> Typeface.SANS_SERIF
+            name.contains("gill") -> Typeface.SANS_SERIF
             
             // 等宽字体 (Monospace)
             name.contains("courier") -> Typeface.MONOSPACE
@@ -2689,28 +3000,17 @@ object FontMapper {
             name.contains("monaco") -> Typeface.MONOSPACE
             name.contains("mono") -> Typeface.MONOSPACE
             name.contains("menlo") -> Typeface.MONOSPACE
+            name.contains("source code") -> Typeface.MONOSPACE
+            name.contains("fira code") -> Typeface.MONOSPACE
+            name.contains("jetbrains") -> Typeface.MONOSPACE
             
             // Symbol 和 ZapfDingbats - 使用默认字体（编码已在 StandardEncodings 中处理）
             name.contains("symbol") -> Typeface.SERIF
             name.contains("dingbats") -> Typeface.SERIF
             name.contains("wingdings") -> Typeface.SERIF
+            name.contains("webdings") -> Typeface.SERIF
             
-            // 中文字体映射
-            name.contains("simsun") -> Typeface.SERIF      // 宋体
-            name.contains("simhei") -> Typeface.SANS_SERIF  // 黑体
-            name.contains("simkai") -> Typeface.SERIF       // 楷体
-            name.contains("fangsong") -> Typeface.SERIF     // 仿宋
-            name.contains("microsoft yahei") -> Typeface.SANS_SERIF
-            name.contains("nsimsun") -> Typeface.SERIF
-            name.contains("kaiti") -> Typeface.SERIF
-            name.contains("heiti") -> Typeface.SANS_SERIF
-            name.contains("songti") -> Typeface.SERIF
-            
-            // 日文字体映射
-            name.contains("mincho") -> Typeface.SERIF
-            name.contains("gothic") -> Typeface.SANS_SERIF
-            
-            // 默认使用无衬线字体
+            // 默认使用系统默认字体
             else -> Typeface.DEFAULT
         }
         
@@ -2719,21 +3019,329 @@ object FontMapper {
             // 粗斜体
             (name.contains("bolditalic") || name.contains("boldoblique") ||
              name.contains("bold") && (name.contains("italic") || name.contains("oblique")) ||
-             name.contains("bi") && name.length > 2 && name.endsWith("bi")) -> Typeface.BOLD_ITALIC
+             name.contains("bi") && name.length > 2 && name.endsWith("bi") ||
+             name.contains("-bi") || name.contains("_bi")) -> Typeface.BOLD_ITALIC
             
             // 粗体
             name.contains("bold") || name.contains("-bd") || 
-            name.endsWith("bd") || name.contains("black") ||
-            name.contains("heavy") || name.contains("demi") -> Typeface.BOLD
+            name.endsWith("bd") || name.contains("_bd") ||
+            name.contains("black") || name.contains("heavy") || 
+            name.contains("demi") || name.contains("semibold") ||
+            name.contains("extrabold") || name.contains("ultrabold") ||
+            name.contains("-b") && !name.contains("-bi") -> Typeface.BOLD
             
             // 斜体
             name.contains("italic") || name.contains("oblique") || 
-            name.contains("-it") || name.endsWith("it") -> Typeface.ITALIC
+            name.contains("-it") || name.endsWith("it") ||
+            name.contains("_it") || name.contains("-i") && !name.contains("-it") -> Typeface.ITALIC
             
             // 正常
             else -> Typeface.NORMAL
         }
         
         return Typeface.create(family, style)
+    }
+    
+    /**
+     * 获取用于 CJK 字符的回退字体
+     * Android 系统会自动使用 Noto Sans CJK 或 DroidSansFallback
+     */
+    fun getCJKFallbackTypeface(): Typeface {
+        // Android 系统默认字体会自动回退到 CJK 字体
+        return Typeface.DEFAULT
+    }
+    
+    /**
+     * 检测文本是否包含 CJK 字符
+     */
+    fun containsCJKCharacters(text: String): Boolean {
+        for (c in text) {
+            val codePoint = c.code
+            // CJK 统一汉字
+            if (codePoint in 0x4E00..0x9FFF) return true
+            // CJK 扩展 A
+            if (codePoint in 0x3400..0x4DBF) return true
+            // CJK 兼容汉字
+            if (codePoint in 0xF900..0xFAFF) return true
+            // 日文假名
+            if (codePoint in 0x3040..0x30FF) return true
+            // 韩文音节
+            if (codePoint in 0xAC00..0xD7AF) return true
+            // 韩文字母
+            if (codePoint in 0x1100..0x11FF) return true
+            // CJK 符号和标点
+            if (codePoint in 0x3000..0x303F) return true
+            // 全角 ASCII
+            if (codePoint in 0xFF00..0xFFEF) return true
+        }
+        return false
+    }
+}
+
+/**
+ * 字体回退机制
+ * 
+ * 当 PDF 字体无法渲染某些字符时，使用系统字体进行回退
+ * 特别针对 CJK 字符和特殊符号（如表情符号）
+ */
+object FontFallback {
+    
+    /**
+     * 文本段
+     */
+    data class TextSegment(
+        val text: String,
+        val useFallback: Boolean
+    )
+    
+    /**
+     * 检查文本是否需要字体回退
+     */
+    fun needsFallback(text: String, paint: Paint): Boolean {
+        if (text.isEmpty()) return false
+        
+        // 检查每个字符是否可以被当前字体渲染
+        for (i in text.indices) {
+            val codePoint = text.codePointAt(i)
+            
+            // 跳过 surrogate 对的低位部分
+            if (Character.isLowSurrogate(text[i])) continue
+            
+            if (!canRenderCodePoint(paint, codePoint)) {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /**
+     * 检查字体是否可以渲染指定的 code point
+     */
+    private fun canRenderCodePoint(paint: Paint, codePoint: Int): Boolean {
+        // 使用 Paint.hasGlyph() 检查 (API 23+)
+        return try {
+            val str = String(Character.toChars(codePoint))
+            paint.hasGlyph(str)
+        } catch (e: Exception) {
+            // 如果 hasGlyph 不可用，假设可以渲染
+            // 对于特殊字符范围，假设需要回退
+            !isSpecialCharacter(codePoint)
+        }
+    }
+    
+    /**
+     * 检查是否为特殊字符（可能需要回退的字符）
+     */
+    private fun isSpecialCharacter(codePoint: Int): Boolean {
+        // Unicode 私有使用区 (PUA) - Symbol 字体常用
+        // 这些字符需要特殊处理或转换
+        if (codePoint in 0xF000..0xF0FF) return true
+        // CJK 统一汉字
+        if (codePoint in 0x4E00..0x9FFF) return true
+        // CJK 扩展 A
+        if (codePoint in 0x3400..0x4DBF) return true
+        // CJK 扩展 B-F
+        if (codePoint in 0x20000..0x2EBEF) return true
+        // CJK 兼容汉字
+        if (codePoint in 0xF900..0xFAFF) return true
+        // 日文假名
+        if (codePoint in 0x3040..0x30FF) return true
+        // 韩文音节
+        if (codePoint in 0xAC00..0xD7AF) return true
+        // 韩文字母
+        if (codePoint in 0x1100..0x11FF) return true
+        // CJK 符号和标点
+        if (codePoint in 0x3000..0x303F) return true
+        // 全角 ASCII
+        if (codePoint in 0xFF00..0xFFEF) return true
+        // 表情符号
+        if (codePoint in 0x1F300..0x1F9FF) return true
+        // 其他表情符号
+        if (codePoint in 0x2600..0x26FF) return true
+        if (codePoint in 0x2700..0x27BF) return true
+        // 数学符号
+        if (codePoint in 0x2200..0x22FF) return true
+        // 希腊字母
+        if (codePoint in 0x0370..0x03FF) return true
+        // 箭头
+        if (codePoint in 0x2190..0x21FF) return true
+        
+        return false
+    }
+    
+    /**
+     * 将文本分割为需要回退和不需要回退的段
+     */
+    fun segmentText(text: String, paint: Paint): List<TextSegment> {
+        if (text.isEmpty()) return emptyList()
+        
+        val segments = mutableListOf<TextSegment>()
+        val currentSegment = StringBuilder()
+        var currentNeedsFallback = false
+        var isFirst = true
+        
+        var i = 0
+        while (i < text.length) {
+            val codePoint = text.codePointAt(i)
+            val charCount = Character.charCount(codePoint)
+            val charStr = text.substring(i, i + charCount)
+            
+            val needsFallback = !canRenderCodePoint(paint, codePoint)
+            
+            if (isFirst) {
+                currentNeedsFallback = needsFallback
+                isFirst = false
+            }
+            
+            if (needsFallback == currentNeedsFallback) {
+                // 相同类型，添加到当前段
+                currentSegment.append(charStr)
+            } else {
+                // 类型变化，保存当前段并开始新段
+                if (currentSegment.isNotEmpty()) {
+                    segments.add(TextSegment(currentSegment.toString(), currentNeedsFallback))
+                    currentSegment.clear()
+                }
+                currentSegment.append(charStr)
+                currentNeedsFallback = needsFallback
+            }
+            
+            i += charCount
+        }
+        
+        // 添加最后一段
+        if (currentSegment.isNotEmpty()) {
+            segments.add(TextSegment(currentSegment.toString(), currentNeedsFallback))
+        }
+        
+        return segments
+    }
+    
+    /**
+     * 获取回退字体
+     * 根据文本内容选择合适的系统字体
+     */
+    fun getFallbackTypeface(text: String): Typeface {
+        // 检测文本类型
+        val charType = detectCharacterType(text)
+        
+        return when (charType) {
+            CharacterType.CJK_SIMPLIFIED_CHINESE,
+            CharacterType.CJK_TRADITIONAL_CHINESE,
+            CharacterType.CJK_JAPANESE,
+            CharacterType.CJK_KOREAN,
+            CharacterType.CJK_GENERIC -> {
+                // Android 系统会自动回退到 Noto Sans CJK 或 DroidSansFallback
+                Typeface.DEFAULT
+            }
+            CharacterType.EMOJI -> {
+                // 表情符号使用系统字体
+                Typeface.DEFAULT
+            }
+            CharacterType.SYMBOL -> {
+                // 符号使用 Sans Serif
+                Typeface.SANS_SERIF
+            }
+            else -> Typeface.DEFAULT
+        }
+    }
+    
+    /**
+     * 字符类型
+     */
+    private enum class CharacterType {
+        ASCII,
+        CJK_SIMPLIFIED_CHINESE,
+        CJK_TRADITIONAL_CHINESE,
+        CJK_JAPANESE,
+        CJK_KOREAN,
+        CJK_GENERIC,
+        EMOJI,
+        SYMBOL,
+        OTHER
+    }
+    
+    /**
+     * 检测文本的主要字符类型
+     */
+    private fun detectCharacterType(text: String): CharacterType {
+        if (text.isEmpty()) return CharacterType.OTHER
+        
+        var cjkCount = 0
+        var japaneseKanaCount = 0
+        var koreanCount = 0
+        var emojiCount = 0
+        var symbolCount = 0
+        var total = 0
+        
+        var i = 0
+        while (i < text.length) {
+            val codePoint = text.codePointAt(i)
+            val charCount = Character.charCount(codePoint)
+            
+            when {
+                // CJK 汉字
+                codePoint in 0x4E00..0x9FFF ||
+                codePoint in 0x3400..0x4DBF ||
+                codePoint in 0x20000..0x2EBEF ||
+                codePoint in 0xF900..0xFAFF -> {
+                    cjkCount++
+                }
+                // 日文假名
+                codePoint in 0x3040..0x30FF -> {
+                    japaneseKanaCount++
+                }
+                // 韩文
+                codePoint in 0xAC00..0xD7AF ||
+                codePoint in 0x1100..0x11FF -> {
+                    koreanCount++
+                }
+                // 表情符号
+                codePoint in 0x1F300..0x1F9FF ||
+                codePoint in 0x2600..0x26FF ||
+                codePoint in 0x2700..0x27BF -> {
+                    emojiCount++
+                }
+                // 数学/技术符号
+                codePoint in 0x2000..0x2BFF -> {
+                    symbolCount++
+                }
+            }
+            
+            total++
+            i += charCount
+        }
+        
+        return when {
+            emojiCount > 0 -> CharacterType.EMOJI
+            japaneseKanaCount > 0 -> CharacterType.CJK_JAPANESE
+            koreanCount > 0 -> CharacterType.CJK_KOREAN
+            cjkCount > 0 -> CharacterType.CJK_GENERIC
+            symbolCount > 0 -> CharacterType.SYMBOL
+            else -> CharacterType.OTHER
+        }
+    }
+    
+    /**
+     * 计算文本的宽度（支持混合字体）
+     */
+    fun measureTextWithFallback(text: String, paint: Paint): Float {
+        if (text.isEmpty()) return 0f
+        
+        val segments = segmentText(text, paint)
+        var totalWidth = 0f
+        
+        for (segment in segments) {
+            totalWidth += if (segment.useFallback) {
+                val fallbackPaint = Paint(paint)
+                fallbackPaint.typeface = getFallbackTypeface(segment.text)
+                fallbackPaint.measureText(segment.text)
+            } else {
+                paint.measureText(segment.text)
+            }
+        }
+        
+        return totalWidth
     }
 }

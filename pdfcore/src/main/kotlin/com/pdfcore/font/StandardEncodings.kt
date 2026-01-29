@@ -441,6 +441,44 @@ object StandardEncodings {
     )
     
     /**
+     * 将 Symbol 字体 PUA 字符 (U+F000-U+F0FF) 转换为标准 Unicode
+     * 
+     * 许多 PDF 使用 Unicode 私有使用区域 (PUA) 来表示 Symbol 字体字符。
+     * 这些 PUA 字符遵循 Symbol 编码规则：U+F0xx 对应 Symbol 编码 0xxx
+     * 
+     * 例如：
+     * - U+F06C → 0x6C → λ (U+03BB)
+     * - U+F070 → 0x70 → π (U+03C0)
+     * - U+F044 → 0x44 → Δ (U+0394)
+     * - U+F02D → 0x2D → − (U+2212)
+     * 
+     * @param char 可能是 PUA 字符的字符
+     * @return 如果是 PUA 字符，返回对应的标准 Unicode 字符；否则返回 null
+     */
+    fun convertPUAToUnicode(char: Char): Char? {
+        val code = char.code
+        if (code in 0xF000..0xF0FF) {
+            val symbolCode = code - 0xF000
+            return symbolEncoding[symbolCode]
+        }
+        return null
+    }
+    
+    /**
+     * 检查字符是否在 PUA 范围内 (U+F000-U+F0FF)
+     */
+    fun isPUACharacter(char: Char): Boolean {
+        return char.code in 0xF000..0xF0FF
+    }
+    
+    /**
+     * 检查 code point 是否在 PUA 范围内 (U+F000-U+F0FF)
+     */
+    fun isPUACodePoint(codePoint: Int): Boolean {
+        return codePoint in 0xF000..0xF0FF
+    }
+    
+    /**
      * ZapfDingbatsEncoding - PDF 32000-1:2008 Annex D.6
      * ZapfDingbats 字体的内置编码，包含装饰符号
      */
@@ -982,5 +1020,15 @@ object GlyphList {
         }
         
         return null
+    }
+    
+    /**
+     * 将 Symbol 字体 PUA 字符 (U+F000-U+F0FF) 转换为标准 Unicode
+     * 委托给 StandardEncodings 的实现
+     * 
+     * @see StandardEncodings.convertPUAToUnicode
+     */
+    fun convertPUAToUnicode(char: Char): Char? {
+        return StandardEncodings.convertPUAToUnicode(char)
     }
 }
