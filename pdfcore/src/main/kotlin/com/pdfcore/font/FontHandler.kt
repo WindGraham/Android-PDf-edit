@@ -456,7 +456,7 @@ class FontHandler(private val document: PdfDocument) {
     /**
      * 解析编码
      * 
-     * 对于 Symbol 和 ZapfDingbats 字体，根据 PDF 32000-1:2008 标准，
+     * 对于 Symbol、ZapfDingbats 和 TeX 数学字体，根据 PDF 32000-1:2008 标准，
      * 它们有内置的专用编码，应该使用内置编码而不是通用编码。
      */
     private fun parseEncoding(fontDict: PdfDictionary, baseFont: String = ""): FontEncoding {
@@ -475,6 +475,18 @@ class FontHandler(private val document: PdfDocument) {
             // ZapfDingbats 字体使用专用编码
             if (fontDict["Encoding"] == null) {
                 return FontEncoding.Named("ZapfDingbatsEncoding")
+            }
+        }
+        
+        // 检测 TeX 数学字体 - 使用专用编码
+        // Computer Modern 系列：CMMI (斜体)、CMSY (符号)、CMEX (大型符号)、CMR (罗马)
+        if (StandardEncodings.isTeXMathFont(baseFont)) {
+            // TeX 字体使用专用编码（如果没有明确指定其他编码）
+            if (fontDict["Encoding"] == null) {
+                val texEncoding = StandardEncodings.getTeXFontEncoding(baseFont)
+                if (texEncoding != null) {
+                    return FontEncoding.Named(texEncoding)
+                }
             }
         }
         

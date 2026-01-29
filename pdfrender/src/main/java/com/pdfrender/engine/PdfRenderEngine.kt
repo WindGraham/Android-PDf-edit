@@ -7,7 +7,10 @@ import com.pdfcore.font.FontHandler
 import com.pdfcore.font.PdfFont
 import com.pdfcore.font.SimpleFont
 import com.pdfcore.font.StandardEncodings
+import com.pdfcore.font.Type0Font
+import com.pdfcore.font.EmbeddedFontType
 import com.pdfcore.function.PdfFunction
+import com.pdfrender.font.FontAssetManager
 import com.pdfcore.model.*
 import com.pdfcore.parser.StreamFilters
 
@@ -1937,6 +1940,8 @@ private class RenderState(
         
         // 尝试使用嵌入字体
         val font = currentState.font
+        
+        // 1. 简单字体 (Type1, TrueType, Type3)
         if (font is SimpleFont && font.hasEmbeddedFont()) {
             val typeface = FontMapper.createFromEmbedded(font)
             if (typeface != null) {
@@ -1945,7 +1950,16 @@ private class RenderState(
             }
         }
         
-        // 回退：根据字体的 BaseFont 名称设置正确的 Typeface（字体样式）
+        // 2. Type0 复合字体 (CID 字体)
+        if (font is Type0Font) {
+            val typeface = FontMapper.createFromType0Font(font)
+            if (typeface != null) {
+                textPaint.typeface = typeface
+                return
+            }
+        }
+        
+        // 3. 回退：根据字体的 BaseFont 名称设置正确的 Typeface（字体样式）
         val baseFont = font?.baseFont ?: ""
         textPaint.typeface = FontMapper.mapToTypeface(baseFont)
     }
@@ -2740,6 +2754,11 @@ object FontMapper {
     
     /**
      * 从嵌入字体数据创建 Typeface
+     * 
+     * 支持的字体格式：
+     * - TrueType (.ttf)
+     * - OpenType (.otf)
+     * - CFF/Type1C (尝试作为 OTF 加载)
      */
     fun createFromEmbedded(font: SimpleFont): Typeface? {
         val baseFont = font.baseFont
@@ -2751,28 +2770,96 @@ object FontMapper {
         
         val embeddedFont = font.embeddedFont ?: return null
         
-        // 只有 TrueType 和 OpenType 字体可以被 Android 直接使用
-        if (!embeddedFont.isAndroidCompatible()) {
-            embeddedTypefaceCache[baseFont] = null
-            return null
+        val typeface = when (embeddedFont.type) {
+            EmbeddedFontType.TRUETYPE, EmbeddedFontType.OPENTYPE -> {
+                // TTF/OTF 格式可以直接加载
+                createTypefaceFromBytes(embeddedFont.data, embeddedFont.getFileExtension())
+            }
+            EmbeddedFontType.TYPE1C, EmbeddedFontType.CID_TYPE0C -> {
+                // CFF 格式：尝试作为 OTF 加载
+                // 某些 CFF 数据实际上是完整的 OpenType-CFF，可以直接加载
+                tryLoadCFF(embeddedFont.data, baseFont)
+            }
+            else -> null
         }
         
-        val typeface = try {
-            // 创建临时文件
+        embeddedTypefaceCache[baseFont] = typeface
+        return typeface
+    }
+    
+    /**
+     * 从字节数组创建 Typeface
+     */
+    private fun createTypefaceFromBytes(data: ByteArray, extension: String): Typeface? {
+        return try {
             val tempFile = java.io.File.createTempFile(
-                "font_${baseFont.hashCode()}", 
-                ".${embeddedFont.getFileExtension()}"
+                "font_${data.hashCode()}", 
+                ".$extension"
             )
             tempFile.deleteOnExit()
-            
-            // 写入字体数据
-            tempFile.writeBytes(embeddedFont.data)
-            
-            // 从文件创建 Typeface
+            tempFile.writeBytes(data)
             Typeface.createFromFile(tempFile)
         } catch (e: Exception) {
-            // 如果创建失败，返回 null
             null
+        }
+    }
+    
+    /**
+     * 尝试加载 CFF 格式字体
+     * 
+     * CFF 数据有几种可能的情况：
+     * 1. 独立的 CFF 数据 - 需要包装成 OpenType 才能使用
+     * 2. OpenType-CFF 格式 - 可以直接作为 OTF 加载
+     * 
+     * Android 不直接支持裸 CFF，但如果 PDF 嵌入的是 OpenType-CFF 格式，
+     * 我们可以尝试直接加载。
+     */
+    private fun tryLoadCFF(data: ByteArray, baseFont: String): Typeface? {
+        // 检查是否为 OpenType 格式 (以 "OTTO" 或版本号开头)
+        if (data.size >= 4) {
+            val isOpenType = (data[0].toInt() and 0xFF == 0x4F && // 'O'
+                             data[1].toInt() and 0xFF == 0x54 && // 'T'
+                             data[2].toInt() and 0xFF == 0x54 && // 'T'
+                             data[3].toInt() and 0xFF == 0x4F)   // 'O'
+            val isTrueType = (data[0].toInt() and 0xFF == 0x00 &&
+                             data[1].toInt() and 0xFF == 0x01 &&
+                             data[2].toInt() and 0xFF == 0x00 &&
+                             data[3].toInt() and 0xFF == 0x00)
+            
+            if (isOpenType || isTrueType) {
+                // 这是一个完整的 OpenType/TrueType 字体，可以直接加载
+                return createTypefaceFromBytes(data, "otf")
+            }
+        }
+        
+        // 对于裸 CFF 数据，Android 无法直接加载
+        // 返回 null，让调用者使用备用字体
+        return null
+    }
+    
+    /**
+     * 从 Type0Font 的 CIDFont 获取嵌入字体
+     */
+    fun createFromType0Font(font: Type0Font): Typeface? {
+        val cidFont = font.cidFont ?: return null
+        if (!cidFont.hasEmbeddedFont()) return null
+        
+        val embeddedFont = cidFont.embeddedFont ?: return null
+        val baseFont = font.baseFont
+        
+        // 检查缓存
+        if (embeddedTypefaceCache.containsKey(baseFont)) {
+            return embeddedTypefaceCache[baseFont]
+        }
+        
+        val typeface = when (embeddedFont.type) {
+            EmbeddedFontType.TRUETYPE, EmbeddedFontType.OPENTYPE -> {
+                createTypefaceFromBytes(embeddedFont.data, embeddedFont.getFileExtension())
+            }
+            EmbeddedFontType.TYPE1C, EmbeddedFontType.CID_TYPE0C -> {
+                tryLoadCFF(embeddedFont.data, baseFont)
+            }
+            else -> null
         }
         
         embeddedTypefaceCache[baseFont] = typeface
@@ -2904,11 +2991,14 @@ object FontMapper {
     
     /**
      * 获取 CJK 字体的推荐样式 (衬线/无衬线)
+     * 
+     * 优先使用应用内打包的中文字体（思源宋体/思源黑体），
+     * 以确保正确的字形显示，特别是宋体风格的字体。
      */
     fun getCJKFontStyle(baseFont: String): Typeface {
         val name = baseFont.lowercase()
         
-        // 衬线体 (宋体/明朝体)
+        // 衬线体 (宋体/明朝体/楷体/仿宋)
         val isSerif = name.contains("song") ||
                       name.contains("ming") ||
                       name.contains("mincho") ||
@@ -2917,7 +3007,16 @@ object FontMapper {
                       name.contains("kai") ||
                       name.contains("fang") ||
                       name.contains("lisong") ||
-                      name.contains("gungsuh")
+                      name.contains("gungsuh") ||
+                      name.contains("simsun") ||
+                      name.contains("nsimsun") ||
+                      name.contains("stsong") ||
+                      name.contains("stzhongsong") ||
+                      name.contains("fzshu") ||
+                      name.contains("fzfang") ||
+                      name.contains("adobe.*song") ||
+                      name.contains("mingliu") ||
+                      name.contains("pmingliu")
         
         // 无衬线体 (黑体/哥特体)
         val isSansSerif = name.contains("hei") ||
@@ -2928,13 +3027,11 @@ object FontMapper {
                          name.contains("meiryo") ||
                          name.contains("yahei") ||
                          name.contains("dengxian") ||
-                         name.contains("sans")
-        
-        val family = when {
-            isSerif -> Typeface.SERIF
-            isSansSerif -> Typeface.SANS_SERIF
-            else -> Typeface.DEFAULT
-        }
+                         name.contains("sans") ||
+                         name.contains("simhei") ||
+                         name.contains("stxihei") ||
+                         name.contains("stheiti") ||
+                         name.contains("fzhei")
         
         // 检测粗体
         val isBold = name.contains("bold") ||
@@ -2943,9 +3040,18 @@ object FontMapper {
                      name.contains("-b") ||
                      name.endsWith("bd")
         
-        val style = if (isBold) Typeface.BOLD else Typeface.NORMAL
+        // 使用 FontAssetManager 获取中文字体
+        val baseTypeface = when {
+            isSerif -> FontAssetManager.getSerifCJK()
+            isSansSerif -> FontAssetManager.getSansCJK()
+            else -> FontAssetManager.getSansCJK() // CJK 默认使用无衬线字体
+        }
         
-        return Typeface.create(family, style)
+        return if (isBold) {
+            Typeface.create(baseTypeface, Typeface.BOLD)
+        } else {
+            baseTypeface
+        }
     }
     
     /**
@@ -3044,11 +3150,10 @@ object FontMapper {
     
     /**
      * 获取用于 CJK 字符的回退字体
-     * Android 系统会自动使用 Noto Sans CJK 或 DroidSansFallback
+     * 优先使用应用内打包的中文字体
      */
     fun getCJKFallbackTypeface(): Typeface {
-        // Android 系统默认字体会自动回退到 CJK 字体
-        return Typeface.DEFAULT
+        return FontAssetManager.getSansCJK()
     }
     
     /**
@@ -3160,12 +3265,29 @@ object FontFallback {
         // 其他表情符号
         if (codePoint in 0x2600..0x26FF) return true
         if (codePoint in 0x2700..0x27BF) return true
-        // 数学符号
-        if (codePoint in 0x2200..0x22FF) return true
         // 希腊字母
         if (codePoint in 0x0370..0x03FF) return true
+        // 希腊扩展
+        if (codePoint in 0x1F00..0x1FFF) return true
+        // 数学运算符
+        if (codePoint in 0x2200..0x22FF) return true
+        // 补充数学运算符
+        if (codePoint in 0x2A00..0x2AFF) return true
+        // 杂项数学符号 A
+        if (codePoint in 0x27C0..0x27EF) return true
+        // 杂项数学符号 B
+        if (codePoint in 0x2980..0x29FF) return true
+        // 数学字母数字符号
+        if (codePoint in 0x1D400..0x1D7FF) return true
+        // 字母式符号
+        if (codePoint in 0x2100..0x214F) return true
         // 箭头
         if (codePoint in 0x2190..0x21FF) return true
+        // 补充箭头 A/B/C
+        if (codePoint in 0x27F0..0x27FF) return true
+        if (codePoint in 0x2900..0x297F) return true
+        // 杂项技术符号
+        if (codePoint in 0x2300..0x23FF) return true
         
         return false
     }
@@ -3220,7 +3342,11 @@ object FontFallback {
     
     /**
      * 获取回退字体
-     * 根据文本内容选择合适的系统字体
+     * 根据文本内容选择合适的字体
+     * 
+     * 优先使用应用内打包的字体，以确保正确显示：
+     * - CJK 字符使用思源黑体/宋体
+     * - 数学符号使用 Noto Sans Math
      */
     fun getFallbackTypeface(text: String): Typeface {
         // 检测文本类型
@@ -3232,16 +3358,20 @@ object FontFallback {
             CharacterType.CJK_JAPANESE,
             CharacterType.CJK_KOREAN,
             CharacterType.CJK_GENERIC -> {
-                // Android 系统会自动回退到 Noto Sans CJK 或 DroidSansFallback
-                Typeface.DEFAULT
+                // 使用应用内打包的中文字体
+                FontAssetManager.getSansCJK()
             }
             CharacterType.EMOJI -> {
                 // 表情符号使用系统字体
                 Typeface.DEFAULT
             }
-            CharacterType.SYMBOL -> {
-                // 符号使用 Sans Serif
-                Typeface.SANS_SERIF
+            CharacterType.SYMBOL, CharacterType.MATH -> {
+                // 数学符号和其他符号使用数学字体
+                FontAssetManager.getMathFont()
+            }
+            CharacterType.GREEK -> {
+                // 希腊字母使用数学字体（包含完整的希腊字母）
+                FontAssetManager.getMathFont()
             }
             else -> Typeface.DEFAULT
         }
@@ -3259,6 +3389,8 @@ object FontFallback {
         CJK_GENERIC,
         EMOJI,
         SYMBOL,
+        MATH,       // 数学符号
+        GREEK,      // 希腊字母
         OTHER
     }
     
@@ -3273,6 +3405,8 @@ object FontFallback {
         var koreanCount = 0
         var emojiCount = 0
         var symbolCount = 0
+        var mathCount = 0
+        var greekCount = 0
         var total = 0
         
         var i = 0
@@ -3297,14 +3431,32 @@ object FontFallback {
                 codePoint in 0x1100..0x11FF -> {
                     koreanCount++
                 }
+                // 希腊字母
+                codePoint in 0x0370..0x03FF ||
+                codePoint in 0x1F00..0x1FFF -> {
+                    greekCount++
+                }
+                // 数学运算符和符号
+                codePoint in 0x2200..0x22FF || // Mathematical Operators
+                codePoint in 0x2A00..0x2AFF || // Supplemental Mathematical Operators
+                codePoint in 0x27C0..0x27EF || // Miscellaneous Mathematical Symbols-A
+                codePoint in 0x2980..0x29FF || // Miscellaneous Mathematical Symbols-B
+                codePoint in 0x1D400..0x1D7FF || // Mathematical Alphanumeric Symbols
+                codePoint in 0x2100..0x214F -> { // Letterlike Symbols
+                    mathCount++
+                }
                 // 表情符号
                 codePoint in 0x1F300..0x1F9FF ||
                 codePoint in 0x2600..0x26FF ||
                 codePoint in 0x2700..0x27BF -> {
                     emojiCount++
                 }
-                // 数学/技术符号
-                codePoint in 0x2000..0x2BFF -> {
+                // 其他技术符号
+                codePoint in 0x2000..0x206F || // General Punctuation
+                codePoint in 0x2300..0x23FF || // Miscellaneous Technical
+                codePoint in 0x2500..0x257F || // Box Drawing
+                codePoint in 0x2580..0x259F || // Block Elements
+                codePoint in 0x25A0..0x25FF -> { // Geometric Shapes
                     symbolCount++
                 }
             }
@@ -3318,6 +3470,8 @@ object FontFallback {
             japaneseKanaCount > 0 -> CharacterType.CJK_JAPANESE
             koreanCount > 0 -> CharacterType.CJK_KOREAN
             cjkCount > 0 -> CharacterType.CJK_GENERIC
+            mathCount > 0 -> CharacterType.MATH
+            greekCount > 0 -> CharacterType.GREEK
             symbolCount > 0 -> CharacterType.SYMBOL
             else -> CharacterType.OTHER
         }

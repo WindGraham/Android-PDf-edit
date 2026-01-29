@@ -142,6 +142,20 @@ object StandardEncodings {
             return zapfDingbatsEncoding[code]
         }
         
+        // TeX 数学字体编码
+        if (encodingName == "CMREncoding" || encodingName.contains("CMR")) {
+            return cmrEncoding[code]
+        }
+        if (encodingName == "CMMIEncoding" || encodingName.contains("CMMI")) {
+            return cmmiEncoding[code]
+        }
+        if (encodingName == "CMSYEncoding" || encodingName.contains("CMSY")) {
+            return cmsyEncoding[code]
+        }
+        if (encodingName == "CMEXEncoding" || encodingName.contains("CMEX")) {
+            return cmexEncoding[code]
+        }
+        
         // 标准 ASCII 范围
         if (code in 0x20..0x7E) {
             return code.toChar()
@@ -164,6 +178,39 @@ object StandardEncodings {
         }
         
         return null
+    }
+    
+    /**
+     * 检测是否为 TeX 数学字体
+     */
+    fun isTeXMathFont(fontName: String): Boolean {
+        val name = fontName.uppercase()
+        return name.startsWith("CM") || // Computer Modern 系列
+               name.startsWith("CMMI") ||
+               name.startsWith("CMSY") ||
+               name.startsWith("CMEX") ||
+               name.startsWith("CMR") ||
+               name.startsWith("CMBX") ||
+               name.startsWith("CMTI") ||
+               name.contains("MATH") ||
+               name.contains("STIX") ||
+               name.contains("CAMBRIA") && name.contains("MATH")
+    }
+    
+    /**
+     * 获取 TeX 字体的编码名称
+     */
+    fun getTeXFontEncoding(fontName: String): String? {
+        val name = fontName.uppercase()
+        return when {
+            name.startsWith("CMMI") || name.contains("CMMI") -> "CMMIEncoding"
+            name.startsWith("CMSY") || name.contains("CMSY") -> "CMSYEncoding"
+            name.startsWith("CMEX") || name.contains("CMEX") -> "CMEXEncoding"
+            name.startsWith("CMR") || name.contains("CMR") -> "CMREncoding"
+            name.startsWith("CMBX") -> "CMREncoding"
+            name.startsWith("CMTI") -> "CMMIEncoding"
+            else -> null
+        }
     }
     
     /**
@@ -686,6 +733,408 @@ object StandardEncodings {
         0xFC to '\u27BC', // a189 (➼)
         0xFD to '\u27BD', // a190 (➽)
         0xFE to '\u27BE'  // a191 (➾)
+    )
+    
+    // ==================== TeX 数学字体编码 ====================
+    
+    /**
+     * CMR (Computer Modern Roman) 编码
+     * TeX 默认罗马字体
+     */
+    private val cmrEncoding = mapOf(
+        0x00 to '\u0393', // Gamma
+        0x01 to '\u0394', // Delta
+        0x02 to '\u0398', // Theta
+        0x03 to '\u039B', // Lambda
+        0x04 to '\u039E', // Xi
+        0x05 to '\u03A0', // Pi
+        0x06 to '\u03A3', // Sigma
+        0x07 to '\u03A5', // Upsilon
+        0x08 to '\u03A6', // Phi
+        0x09 to '\u03A8', // Psi
+        0x0A to '\u03A9', // Omega
+        0x0B to '\uFB00', // ff ligature
+        0x0C to '\uFB01', // fi ligature
+        0x0D to '\uFB02', // fl ligature
+        0x0E to '\uFB03', // ffi ligature
+        0x0F to '\uFB04', // ffl ligature
+        0x10 to '\u0131', // dotless i
+        0x11 to '\u0237', // dotless j (ȷ)
+        0x12 to '\u0060', // grave accent
+        0x13 to '\u00B4', // acute accent
+        0x14 to '\u02C7', // caron
+        0x15 to '\u02D8', // breve
+        0x16 to '\u00AF', // macron
+        0x17 to '\u02DA', // ring above
+        0x18 to '\u00B8', // cedilla
+        0x19 to '\u00DF', // germandbls
+        0x1A to '\u00E6', // ae
+        0x1B to '\u0153', // oe
+        0x1C to '\u00F8', // oslash
+        0x1D to '\u00C6', // AE
+        0x1E to '\u0152', // OE
+        0x1F to '\u00D8', // Oslash
+        // 0x20-0x7E: Standard ASCII (handled by default)
+        0x7F to '\u00A8', // dieresis
+        // 0x80+: 扩展字符
+    )
+    
+    /**
+     * CMMI (Computer Modern Math Italic) 编码
+     * TeX 数学斜体字体，用于变量和函数名
+     */
+    private val cmmiEncoding = mapOf(
+        // 希腊大写字母 (斜体)
+        0x00 to '\u0393', // Gamma (Γ)
+        0x01 to '\u0394', // Delta (Δ)
+        0x02 to '\u0398', // Theta (Θ)
+        0x03 to '\u039B', // Lambda (Λ)
+        0x04 to '\u039E', // Xi (Ξ)
+        0x05 to '\u03A0', // Pi (Π)
+        0x06 to '\u03A3', // Sigma (Σ)
+        0x07 to '\u03A5', // Upsilon (Υ)
+        0x08 to '\u03A6', // Phi (Φ)
+        0x09 to '\u03A8', // Psi (Ψ)
+        0x0A to '\u03A9', // Omega (Ω)
+        // 希腊小写字母
+        0x0B to '\u03B1', // alpha (α)
+        0x0C to '\u03B2', // beta (β)
+        0x0D to '\u03B3', // gamma (γ)
+        0x0E to '\u03B4', // delta (δ)
+        0x0F to '\u03B5', // epsilon (ε)
+        0x10 to '\u03B6', // zeta (ζ)
+        0x11 to '\u03B7', // eta (η)
+        0x12 to '\u03B8', // theta (θ)
+        0x13 to '\u03B9', // iota (ι)
+        0x14 to '\u03BA', // kappa (κ)
+        0x15 to '\u03BB', // lambda (λ)
+        0x16 to '\u03BC', // mu (μ)
+        0x17 to '\u03BD', // nu (ν)
+        0x18 to '\u03BE', // xi (ξ)
+        0x19 to '\u03C0', // pi (π)
+        0x1A to '\u03C1', // rho (ρ)
+        0x1B to '\u03C3', // sigma (σ)
+        0x1C to '\u03C4', // tau (τ)
+        0x1D to '\u03C5', // upsilon (υ)
+        0x1E to '\u03C6', // phi (φ)
+        0x1F to '\u03C7', // chi (χ)
+        0x20 to '\u03C8', // psi (ψ)
+        0x21 to '\u03C9', // omega (ω)
+        0x22 to '\u03B5', // varepsilon (ε 变体)
+        0x23 to '\u03D1', // vartheta (ϑ)
+        0x24 to '\u03D6', // varpi (ϖ)
+        0x25 to '\u03F1', // varrho (ϱ)
+        0x26 to '\u03C2', // varsigma (ς)
+        0x27 to '\u03D5', // varphi (ϕ)
+        // 符号
+        0x28 to '\u21BC', // leftharpoonup (↼)
+        0x29 to '\u21BD', // leftharpoondown (↽)
+        0x2A to '\u21C0', // rightharpoonup (⇀)
+        0x2B to '\u21C1', // rightharpoondown (⇁)
+        0x2C to '\u02CB', // lhook
+        0x2D to '\u02CA', // rhook
+        0x2E to '\u25B7', // triangleright (▷)
+        0x2F to '\u25C1', // triangleleft (◁)
+        // 0x30-0x39: 数字 (斜体)
+        0x30 to '0',
+        0x31 to '1',
+        0x32 to '2',
+        0x33 to '3',
+        0x34 to '4',
+        0x35 to '5',
+        0x36 to '6',
+        0x37 to '7',
+        0x38 to '8',
+        0x39 to '9',
+        // 标点和符号
+        0x3A to '\u002E', // period.math
+        0x3B to '\u002C', // comma.math
+        0x3C to '\u003C', // less
+        0x3D to '\u002F', // slash
+        0x3E to '\u003E', // greater
+        0x3F to '\u22C6', // star (⋆)
+        0x40 to '\u2202', // partial (∂)
+        // 大写字母 (斜体)
+        0x41 to 'A', 0x42 to 'B', 0x43 to 'C', 0x44 to 'D',
+        0x45 to 'E', 0x46 to 'F', 0x47 to 'G', 0x48 to 'H',
+        0x49 to 'I', 0x4A to 'J', 0x4B to 'K', 0x4C to 'L',
+        0x4D to 'M', 0x4E to 'N', 0x4F to 'O', 0x50 to 'P',
+        0x51 to 'Q', 0x52 to 'R', 0x53 to 'S', 0x54 to 'T',
+        0x55 to 'U', 0x56 to 'V', 0x57 to 'W', 0x58 to 'X',
+        0x59 to 'Y', 0x5A to 'Z',
+        0x5B to '\u266D', // flat (♭)
+        0x5C to '\u266E', // natural (♮)
+        0x5D to '\u266F', // sharp (♯)
+        0x5E to '\u2323', // smile (⌣)
+        0x5F to '\u2322', // frown (⌢)
+        0x60 to '\u2113', // ell (ℓ)
+        // 小写字母 (斜体)
+        0x61 to 'a', 0x62 to 'b', 0x63 to 'c', 0x64 to 'd',
+        0x65 to 'e', 0x66 to 'f', 0x67 to 'g', 0x68 to 'h',
+        0x69 to 'i', 0x6A to 'j', 0x6B to 'k', 0x6C to 'l',
+        0x6D to 'm', 0x6E to 'n', 0x6F to 'o', 0x70 to 'p',
+        0x71 to 'q', 0x72 to 'r', 0x73 to 's', 0x74 to 't',
+        0x75 to 'u', 0x76 to 'v', 0x77 to 'w', 0x78 to 'x',
+        0x79 to 'y', 0x7A to 'z',
+        0x7B to '\u0131', // dotlessi (ı)
+        0x7C to '\u0237', // dotlessj (ȷ)
+        0x7D to '\u2118', // weierstrass (℘)
+        0x7E to '\u20D7', // vector accent (⃗)
+        0x7F to '\u02D9', // dot accent
+    )
+    
+    /**
+     * CMSY (Computer Modern Math Symbols) 编码
+     * TeX 数学符号字体
+     */
+    private val cmsyEncoding = mapOf(
+        0x00 to '\u2212', // minus (−)
+        0x01 to '\u22C5', // cdot (⋅)
+        0x02 to '\u00D7', // times (×)
+        0x03 to '\u2217', // ast (∗)
+        0x04 to '\u00F7', // div (÷)
+        0x05 to '\u22C4', // diamond (⋄)
+        0x06 to '\u00B1', // pm (±)
+        0x07 to '\u2213', // mp (∓)
+        0x08 to '\u2295', // oplus (⊕)
+        0x09 to '\u2296', // ominus (⊖)
+        0x0A to '\u2297', // otimes (⊗)
+        0x0B to '\u2298', // oslash (⊘)
+        0x0C to '\u2299', // odot (⊙)
+        0x0D to '\u25CB', // bigcirc (○)
+        0x0E to '\u2218', // circ (∘)
+        0x0F to '\u2219', // bullet (∙)
+        0x10 to '\u224D', // asymp (≍)
+        0x11 to '\u2261', // equiv (≡)
+        0x12 to '\u2286', // subseteq (⊆)
+        0x13 to '\u2287', // supseteq (⊇)
+        0x14 to '\u2264', // leq (≤)
+        0x15 to '\u2265', // geq (≥)
+        0x16 to '\u2AAF', // preceq (⪯)
+        0x17 to '\u2AB0', // succeq (⪰)
+        0x18 to '\u223C', // sim (∼)
+        0x19 to '\u2248', // approx (≈)
+        0x1A to '\u2282', // subset (⊂)
+        0x1B to '\u2283', // supset (⊃)
+        0x1C to '\u226A', // ll (≪)
+        0x1D to '\u226B', // gg (≫)
+        0x1E to '\u227A', // prec (≺)
+        0x1F to '\u227B', // succ (≻)
+        0x20 to '\u2190', // leftarrow (←)
+        0x21 to '\u2192', // rightarrow (→)
+        0x22 to '\u2191', // uparrow (↑)
+        0x23 to '\u2193', // downarrow (↓)
+        0x24 to '\u2194', // leftrightarrow (↔)
+        0x25 to '\u2197', // nearrow (↗)
+        0x26 to '\u2198', // searrow (↘)
+        0x27 to '\u2243', // simeq (≃)
+        0x28 to '\u21D0', // Leftarrow (⇐)
+        0x29 to '\u21D2', // Rightarrow (⇒)
+        0x2A to '\u21D1', // Uparrow (⇑)
+        0x2B to '\u21D3', // Downarrow (⇓)
+        0x2C to '\u21D4', // Leftrightarrow (⇔)
+        0x2D to '\u2196', // nwarrow (↖)
+        0x2E to '\u2199', // swarrow (↙)
+        0x2F to '\u221D', // propto (∝)
+        0x30 to '\u2032', // prime (′)
+        0x31 to '\u221E', // infty (∞)
+        0x32 to '\u2208', // in (∈)
+        0x33 to '\u220B', // ni (∋)
+        0x34 to '\u25B3', // bigtriangleup (△)
+        0x35 to '\u25BD', // bigtriangledown (▽)
+        0x36 to '\u002F', // slash
+        0x37 to '\u0027', // mapsto (based on context)
+        0x38 to '\u2200', // forall (∀)
+        0x39 to '\u2203', // exists (∃)
+        0x3A to '\u00AC', // neg (¬)
+        0x3B to '\u2205', // emptyset (∅)
+        0x3C to '\u211C', // Re (ℜ)
+        0x3D to '\u2111', // Im (ℑ)
+        0x3E to '\u22A4', // top (⊤)
+        0x3F to '\u22A5', // bot (⊥)
+        0x40 to '\u2135', // aleph (ℵ)
+        // Calligraphic/Script letters A-Z
+        // 部分字符在 BMP 内有对应字符，其他使用普通字母作为回退
+        // 完整的 Mathematical Script 字符在 U+1D400-1D7FF 范围，超出 Char 范围
+        0x41 to 'A', // 𝒜 (Mathematical Script A - 使用回退)
+        0x42 to '\u212C', // ℬ (Script Capital B)
+        0x43 to 'C', // 𝒞 (使用回退)
+        0x44 to 'D', // 𝒟 (使用回退)
+        0x45 to '\u2130', // ℰ (Script Capital E)
+        0x46 to '\u2131', // ℱ (Script Capital F)
+        0x47 to 'G', // 𝒢 (使用回退)
+        0x48 to '\u210B', // ℋ (Script Capital H)
+        0x49 to '\u2110', // ℐ (Script Capital I)
+        0x4A to 'J', // 𝒥 (使用回退)
+        0x4B to 'K', // 𝒦 (使用回退)
+        0x4C to '\u2112', // ℒ (Script Capital L)
+        0x4D to '\u2133', // ℳ (Script Capital M)
+        0x4E to 'N', // 𝒩 (使用回退)
+        0x4F to 'O', // 𝒪 (使用回退)
+        0x50 to 'P', // 𝒫 (使用回退)
+        0x51 to 'Q', // 𝒬 (使用回退)
+        0x52 to '\u211B', // ℛ (Script Capital R)
+        0x53 to 'S', // 𝒮 (使用回退)
+        0x54 to 'T', // 𝒯 (使用回退)
+        0x55 to 'U', // 𝒰 (使用回退)
+        0x56 to 'V', // 𝒱 (使用回退)
+        0x57 to 'W', // 𝒲 (使用回退)
+        0x58 to 'X', // 𝒳 (使用回退)
+        0x59 to 'Y', // 𝒴 (使用回退)
+        0x5A to 'Z', // 𝒵 (使用回退)
+        0x5B to '\u222A', // cup (∪)
+        0x5C to '\u2229', // cap (∩)
+        0x5D to '\u228E', // uplus (⊎)
+        0x5E to '\u2227', // land/wedge (∧)
+        0x5F to '\u2228', // lor/vee (∨)
+        0x60 to '\u22A2', // vdash (⊢)
+        0x61 to '\u22A3', // dashv (⊣)
+        0x62 to '\u230A', // lfloor (⌊)
+        0x63 to '\u230B', // rfloor (⌋)
+        0x64 to '\u2308', // lceil (⌈)
+        0x65 to '\u2309', // rceil (⌉)
+        0x66 to '\u007B', // lbrace ({)
+        0x67 to '\u007D', // rbrace (})
+        0x68 to '\u27E8', // langle (⟨)
+        0x69 to '\u27E9', // rangle (⟩)
+        0x6A to '\u007C', // vert (|)
+        0x6B to '\u2016', // Vert (‖)
+        0x6C to '\u2195', // updownarrow (↕)
+        0x6D to '\u21D5', // Updownarrow (⇕)
+        0x6E to '\u005C', // backslash (\)
+        0x6F to '\u2240', // wr (≀)
+        0x70 to '\u221A', // surd (√)
+        0x71 to '\u2A3F', // amalg (⨿)
+        0x72 to '\u2207', // nabla (∇)
+        0x73 to '\u222B', // int (∫)
+        0x74 to '\u2294', // sqcup (⊔)
+        0x75 to '\u2293', // sqcap (⊓)
+        0x76 to '\u2291', // sqsubseteq (⊑)
+        0x77 to '\u2292', // sqsupseteq (⊒)
+        0x78 to '\u00A7', // S (§)
+        0x79 to '\u2020', // dag (†)
+        0x7A to '\u2021', // ddag (‡)
+        0x7B to '\u00B6', // P (¶)
+        0x7C to '\u2663', // clubsuit (♣)
+        0x7D to '\u2662', // diamondsuit (♢)
+        0x7E to '\u2661', // heartsuit (♡)
+        0x7F to '\u2660', // spadesuit (♠)
+    )
+    
+    /**
+     * CMEX (Computer Modern Math Extension) 编码
+     * TeX 大型数学符号字体（积分、求和、大括号等）
+     */
+    private val cmexEncoding = mapOf(
+        // 左括号 (多种大小)
+        0x00 to '\u0028', // ( small
+        0x10 to '\u0028', // ( medium
+        0x12 to '\u0028', // ( large
+        0x20 to '\u0028', // ( big
+        0x30 to '\u239B', // ⎛ extensible top
+        0x32 to '\u239D', // ⎝ extensible bottom
+        0x3E to '\u239C', // ⎜ extensible middle
+        
+        // 右括号 (多种大小)
+        0x01 to '\u0029', // ) small
+        0x11 to '\u0029', // ) medium
+        0x13 to '\u0029', // ) large
+        0x21 to '\u0029', // ) big
+        0x31 to '\u239E', // ⎞ extensible top
+        0x33 to '\u23A0', // ⎠ extensible bottom
+        0x3F to '\u239F', // ⎟ extensible middle
+        
+        // 方括号
+        0x02 to '\u005B', // [ small
+        0x03 to '\u005D', // ] small
+        0x22 to '\u005B', // [ big
+        0x23 to '\u005D', // ] big
+        0x34 to '\u23A1', // ⎡ extensible top
+        0x35 to '\u23A4', // ⎤ extensible top
+        0x36 to '\u23A3', // ⎣ extensible bottom
+        0x37 to '\u23A6', // ⎦ extensible bottom
+        0x3C to '\u23A2', // ⎢ extensible middle
+        0x3D to '\u23A5', // ⎥ extensible middle
+        
+        // 花括号
+        0x08 to '\u007B', // { small
+        0x09 to '\u007D', // } small
+        0x28 to '\u007B', // { big
+        0x29 to '\u007D', // } big
+        0x38 to '\u23A7', // ⎧ extensible top
+        0x39 to '\u23AB', // ⎫ extensible top
+        0x3A to '\u23A9', // ⎩ extensible bottom
+        0x3B to '\u23AD', // ⎭ extensible bottom
+        0x3E to '\u23A8', // ⎨ extensible middle
+        0x3F to '\u23AC', // ⎬ extensible middle
+        0x40 to '\u23AA', // ⎪ extensible extension
+        
+        // 尖括号
+        0x0A to '\u27E8', // ⟨ small
+        0x0B to '\u27E9', // ⟩ small
+        0x2A to '\u27E8', // ⟨ big
+        0x2B to '\u27E9', // ⟩ big
+        
+        // 竖线和双竖线
+        0x0C to '\u007C', // | small
+        0x0D to '\u2016', // ‖ small
+        0x2C to '\u007C', // | big
+        0x2D to '\u2016', // ‖ big
+        
+        // 斜线
+        0x0E to '\u002F', // / small
+        0x0F to '\u005C', // \ small
+        0x2E to '\u002F', // / big
+        0x2F to '\u005C', // \ big
+        
+        // 大型运算符
+        0x50 to '\u2211', // ∑ (summation) - display
+        0x58 to '\u2211', // ∑ (summation) - text
+        0x51 to '\u220F', // ∏ (product) - display
+        0x59 to '\u220F', // ∏ (product) - text
+        0x52 to '\u222B', // ∫ (integral) - display
+        0x5A to '\u222B', // ∫ (integral) - text
+        0x53 to '\u22C3', // ⋃ (union) - display
+        0x5B to '\u22C3', // ⋃ (union) - text
+        0x54 to '\u22C2', // ⋂ (intersection) - display
+        0x5C to '\u22C2', // ⋂ (intersection) - text
+        0x55 to '\u2A04', // ⨄ (multiset union) - display
+        0x5D to '\u2A04', // ⨄ (multiset union) - text
+        0x56 to '\u2227', // ∧ (logical and) - display
+        0x5E to '\u2227', // ∧ (logical and) - text
+        0x57 to '\u2228', // ∨ (logical or) - display
+        0x5F to '\u2228', // ∨ (logical or) - text
+        
+        // 更多大型运算符
+        0x60 to '\u2A00', // ⨀ (circled dot) - display
+        0x68 to '\u2A00', // ⨀ (circled dot) - text
+        0x61 to '\u2A01', // ⨁ (circled plus) - display
+        0x69 to '\u2A01', // ⨁ (circled plus) - text
+        0x62 to '\u2A02', // ⨂ (circled times) - display
+        0x6A to '\u2A02', // ⨂ (circled times) - text
+        0x63 to '\u2A06', // ⨆ (square union) - display
+        0x6B to '\u2A06', // ⨆ (square union) - text
+        
+        // 积分变体
+        0x64 to '\u222E', // ∮ (contour integral)
+        0x65 to '\u222F', // ∯ (surface integral)
+        0x66 to '\u2230', // ∰ (volume integral)
+        
+        // 根号
+        0x70 to '\u221A', // √ (radical) - small
+        0x71 to '\u221A', // √ (radical) - medium
+        0x72 to '\u221A', // √ (radical) - large
+        0x73 to '\u221A', // √ (radical) - big
+        
+        // 箭头
+        0x78 to '\u2190', // ← extensible
+        0x79 to '\u2192', // → extensible
+        0x7A to '\u21D0', // ⇐ extensible
+        0x7B to '\u21D2', // ⇒ extensible
+        0x7C to '\u2194', // ↔ extensible
+        0x7D to '\u21D4', // ⇔ extensible
+        0x7E to '\u2195', // ↕
+        0x7F to '\u21D5', // ⇕
     )
 }
 
