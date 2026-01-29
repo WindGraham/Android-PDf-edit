@@ -261,7 +261,7 @@ object StreamFilters {
     fun decodeLZW(data: ByteArray, params: PdfDictionary?): ByteArray {
         if (data.isEmpty()) return data
         
-        val earlyChange = params?.getInt("EarlyChange") ?: 1
+        val earlyChange = params?.getNumber("EarlyChange")?.toInt() ?: 1
         val output = ByteArrayOutputStream()
         
         val table = mutableListOf<ByteArray>()

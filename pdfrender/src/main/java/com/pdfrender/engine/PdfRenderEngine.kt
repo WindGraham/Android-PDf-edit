@@ -5,6 +5,7 @@ import com.pdfcore.content.ContentInstruction
 import com.pdfcore.content.ContentParser
 import com.pdfcore.font.FontHandler
 import com.pdfcore.font.PdfFont
+import com.pdfcore.font.SimpleFont
 import com.pdfcore.model.*
 import com.pdfcore.parser.StreamFilters
 
@@ -187,6 +188,9 @@ private class RenderState(
     private var currentX = 0f
     private var currentY = 0f
     
+    // 待处理的裁切（延迟应用）
+    private var pendingClip: Path.FillType? = null
+    
     // 文本状态
     private var inText = false
     private var textMatrix = Matrix()
@@ -279,6 +283,12 @@ private class RenderState(
             
             // XObject
             "Do" -> drawXObject(instruction.operands)
+            
+            // 扩展图形状态
+            "gs" -> applyExtGState(instruction.operands)
+            
+            // 着色（渐变）
+            "sh" -> drawShading(instruction.operands)
         }
     }
     
@@ -300,7 +310,366 @@ private class RenderState(
     private fun applyState() {
         strokePaint.strokeWidth = currentState.lineWidth
         strokePaint.color = currentState.strokeColor
+        strokePaint.alpha = (currentState.strokeAlpha * 255).toInt()
         fillPaint.color = currentState.fillColor
+        fillPaint.alpha = (currentState.fillAlpha * 255).toInt()
+        textPaint.alpha = (currentState.fillAlpha * 255).toInt()
+        
+        // 应用混合模式
+        val xfermode = PorterDuffXfermode(currentState.blendMode)
+        strokePaint.xfermode = xfermode
+        fillPaint.xfermode = xfermode
+    }
+    
+    /**
+     * 应用扩展图形状态 (gs 操作符)
+     * PDF 32000-1:2008 8.4.5
+     */
+    private fun applyExtGState(operands: List<PdfObject>) {
+        val name = (operands.firstOrNull() as? PdfName)?.name ?: return
+        val gsDict = getExtGState(name) ?: return
+        
+        // ca - 填充透明度 (非描边)
+        gsDict.getFloat("ca")?.let { alpha ->
+            currentState.fillAlpha = alpha.coerceIn(0f, 1f)
+            fillPaint.alpha = (currentState.fillAlpha * 255).toInt()
+            textPaint.alpha = (currentState.fillAlpha * 255).toInt()
+        }
+        
+        // CA - 描边透明度
+        gsDict.getFloat("CA")?.let { alpha ->
+            currentState.strokeAlpha = alpha.coerceIn(0f, 1f)
+            strokePaint.alpha = (currentState.strokeAlpha * 255).toInt()
+        }
+        
+        // LW - 线宽
+        gsDict.getFloat("LW")?.let { lineWidth ->
+            currentState.lineWidth = lineWidth
+            strokePaint.strokeWidth = lineWidth
+        }
+        
+        // LC - 线端点样式
+        gsDict.getInt("LC")?.let { lineCap ->
+            strokePaint.strokeCap = when (lineCap) {
+                1 -> Paint.Cap.ROUND
+                2 -> Paint.Cap.SQUARE
+                else -> Paint.Cap.BUTT
+            }
+        }
+        
+        // LJ - 线连接样式
+        gsDict.getInt("LJ")?.let { lineJoin ->
+            strokePaint.strokeJoin = when (lineJoin) {
+                1 -> Paint.Join.ROUND
+                2 -> Paint.Join.BEVEL
+                else -> Paint.Join.MITER
+            }
+        }
+        
+        // ML - 斜接限制
+        gsDict.getFloat("ML")?.let { miterLimit ->
+            strokePaint.strokeMiter = miterLimit
+        }
+        
+        // BM - 混合模式
+        when (val bm = gsDict["BM"]) {
+            is PdfName -> currentState.blendMode = parseBlendMode(bm.name)
+            is PdfArray -> {
+                // 使用数组中的第一个混合模式
+                (bm.firstOrNull() as? PdfName)?.let {
+                    currentState.blendMode = parseBlendMode(it.name)
+                }
+            }
+            else -> { /* 保持当前混合模式 */ }
+        }
+        val xfermode = PorterDuffXfermode(currentState.blendMode)
+        strokePaint.xfermode = xfermode
+        fillPaint.xfermode = xfermode
+        
+        // SMask - 软遮罩
+        when (val smask = gsDict["SMask"]) {
+            is PdfName -> {
+                if (smask.name == "None") {
+                    currentState.softMask = null
+                }
+            }
+            is PdfDictionary -> currentState.softMask = smask
+            is PdfIndirectRef -> {
+                currentState.softMask = document.getObject(smask) as? PdfDictionary
+            }
+            else -> { /* 保持当前软遮罩设置 */ }
+        }
+        
+        // AIS - 透明度是否影响源
+        // OP, op - 覆印模式
+        // OPM - 覆印模式
+        // Font - 字体
+        // SA - 自动描边调整
+        // TK - 文本挖空
+    }
+    
+    /**
+     * 获取 ExtGState 字典
+     */
+    private fun getExtGState(name: String): PdfDictionary? {
+        val extGStateDict = when (val egs = resources["ExtGState"]) {
+            is PdfDictionary -> egs
+            is PdfIndirectRef -> document.getObject(egs) as? PdfDictionary
+            else -> null
+        } ?: return null
+        
+        return when (val gs = extGStateDict[name]) {
+            is PdfDictionary -> gs
+            is PdfIndirectRef -> document.getObject(gs) as? PdfDictionary
+            else -> null
+        }
+    }
+    
+    /**
+     * 解析混合模式
+     * PDF 32000-1:2008 11.3.5
+     */
+    private fun parseBlendMode(name: String): PorterDuff.Mode {
+        return when (name) {
+            "Normal", "Compatible" -> PorterDuff.Mode.SRC_OVER
+            "Multiply" -> PorterDuff.Mode.MULTIPLY
+            "Screen" -> PorterDuff.Mode.SCREEN
+            "Overlay" -> PorterDuff.Mode.OVERLAY
+            "Darken" -> PorterDuff.Mode.DARKEN
+            "Lighten" -> PorterDuff.Mode.LIGHTEN
+            "ColorDodge" -> PorterDuff.Mode.ADD  // 近似
+            "ColorBurn" -> PorterDuff.Mode.MULTIPLY  // 近似
+            "HardLight" -> PorterDuff.Mode.OVERLAY  // 近似
+            "SoftLight" -> PorterDuff.Mode.OVERLAY  // 近似
+            "Difference" -> PorterDuff.Mode.XOR  // 近似
+            "Exclusion" -> PorterDuff.Mode.XOR  // 近似
+            else -> PorterDuff.Mode.SRC_OVER
+        }
+    }
+    
+    /**
+     * 绘制着色（渐变） - sh 操作符
+     * PDF 32000-1:2008 8.7.4
+     */
+    private fun drawShading(operands: List<PdfObject>) {
+        val name = (operands.firstOrNull() as? PdfName)?.name ?: return
+        val shadingDict = getShading(name) ?: return
+        
+        val shadingType = shadingDict.getInt("ShadingType") ?: return
+        val colorSpace = shadingDict.getNameValue("ColorSpace") ?: "DeviceRGB"
+        val bbox = shadingDict.getArray("BBox")?.toRectangle()
+        
+        when (shadingType) {
+            2 -> drawAxialShading(shadingDict, colorSpace, bbox)
+            3 -> drawRadialShading(shadingDict, colorSpace, bbox)
+            // 其他类型 (1, 4, 5, 6, 7) 暂不支持
+        }
+    }
+    
+    /**
+     * 获取 Shading 字典
+     */
+    private fun getShading(name: String): PdfDictionary? {
+        val shadingDict = when (val sh = resources["Shading"]) {
+            is PdfDictionary -> sh
+            is PdfIndirectRef -> document.getObject(sh) as? PdfDictionary
+            else -> null
+        } ?: return null
+        
+        return when (val shading = shadingDict[name]) {
+            is PdfDictionary -> shading
+            is PdfStream -> shading.dict
+            is PdfIndirectRef -> {
+                when (val obj = document.getObject(shading)) {
+                    is PdfDictionary -> obj
+                    is PdfStream -> obj.dict
+                    else -> null
+                }
+            }
+            else -> null
+        }
+    }
+    
+    /**
+     * 绘制轴向渐变 (ShadingType 2)
+     * PDF 32000-1:2008 8.7.4.5.3
+     */
+    private fun drawAxialShading(
+        shadingDict: PdfDictionary,
+        colorSpace: String,
+        bbox: PdfRectangle?
+    ) {
+        val coords = shadingDict.getArray("Coords") ?: return
+        if (coords.size < 4) return
+        
+        val x0 = coords.getFloat(0) ?: 0f
+        val y0 = coords.getFloat(1) ?: 0f
+        val x1 = coords.getFloat(2) ?: 0f
+        val y1 = coords.getFloat(3) ?: 0f
+        
+        // 获取函数定义
+        val function = shadingDict["Function"] ?: return
+        val domain = shadingDict.getArray("Domain")
+        val t0 = domain?.getFloat(0) ?: 0f
+        val t1 = domain?.getFloat(1) ?: 1f
+        
+        // 计算渐变颜色
+        val colors = evaluateShadingFunction(function, colorSpace, t0, t1)
+        
+        // 创建 LinearGradient
+        val positions = floatArrayOf(0f, 1f)
+        val shader = LinearGradient(
+            x0, y0, x1, y1,
+            colors,
+            positions,
+            Shader.TileMode.CLAMP
+        )
+        
+        // 检查是否需要扩展
+        val extend = shadingDict.getArray("Extend")
+        val extendStart = extend?.getBoolean(0)?.value ?: false
+        val extendEnd = extend?.getBoolean(1)?.value ?: false
+        
+        // 绘制渐变
+        val paint = Paint().apply {
+            this.shader = shader
+            isAntiAlias = true
+            alpha = (currentState.fillAlpha * 255).toInt()
+        }
+        
+        if (bbox != null) {
+            canvas.drawRect(bbox.llx, bbox.lly, bbox.urx, bbox.ury, paint)
+        } else {
+            // 如果没有边界框，绘制一个足够大的区域
+            canvas.save()
+            val bounds = Rect()
+            canvas.getClipBounds(bounds)
+            canvas.drawRect(bounds, paint)
+            canvas.restore()
+        }
+    }
+    
+    /**
+     * 绘制径向渐变 (ShadingType 3)
+     * PDF 32000-1:2008 8.7.4.5.4
+     */
+    private fun drawRadialShading(
+        shadingDict: PdfDictionary,
+        colorSpace: String,
+        bbox: PdfRectangle?
+    ) {
+        val coords = shadingDict.getArray("Coords") ?: return
+        if (coords.size < 6) return
+        
+        val x0 = coords.getFloat(0) ?: 0f
+        val y0 = coords.getFloat(1) ?: 0f
+        val r0 = coords.getFloat(2) ?: 0f
+        val x1 = coords.getFloat(3) ?: 0f
+        val y1 = coords.getFloat(4) ?: 0f
+        val r1 = coords.getFloat(5) ?: 0f
+        
+        // 获取函数定义
+        val function = shadingDict["Function"] ?: return
+        val domain = shadingDict.getArray("Domain")
+        val t0 = domain?.getFloat(0) ?: 0f
+        val t1 = domain?.getFloat(1) ?: 1f
+        
+        // 计算渐变颜色
+        val colors = evaluateShadingFunction(function, colorSpace, t0, t1)
+        
+        // 创建 RadialGradient
+        // 注意：Android RadialGradient 只支持单圆心，这里使用较大的圆
+        val positions = floatArrayOf(0f, 1f)
+        val shader = RadialGradient(
+            x1, y1, r1.coerceAtLeast(0.01f),
+            colors,
+            positions,
+            Shader.TileMode.CLAMP
+        )
+        
+        val paint = Paint().apply {
+            this.shader = shader
+            isAntiAlias = true
+            alpha = (currentState.fillAlpha * 255).toInt()
+        }
+        
+        if (bbox != null) {
+            canvas.drawRect(bbox.llx, bbox.lly, bbox.urx, bbox.ury, paint)
+        } else {
+            canvas.save()
+            val bounds = Rect()
+            canvas.getClipBounds(bounds)
+            canvas.drawRect(bounds, paint)
+            canvas.restore()
+        }
+    }
+    
+    /**
+     * 计算着色函数的颜色值
+     */
+    private fun evaluateShadingFunction(
+        function: PdfObject,
+        colorSpace: String,
+        t0: Float,
+        t1: Float
+    ): IntArray {
+        // 简化处理：直接从函数字典中获取 C0 和 C1
+        val funcDict = when (function) {
+            is PdfDictionary -> function
+            is PdfIndirectRef -> document.getObject(function) as? PdfDictionary
+            else -> null
+        }
+        
+        if (funcDict != null) {
+            val c0 = funcDict.getArray("C0")
+            val c1 = funcDict.getArray("C1")
+            
+            val startColor = colorFromArray(c0, colorSpace)
+            val endColor = colorFromArray(c1, colorSpace)
+            
+            return intArrayOf(startColor, endColor)
+        }
+        
+        // 默认黑到白渐变
+        return intArrayOf(Color.BLACK, Color.WHITE)
+    }
+    
+    /**
+     * 从数组中获取颜色
+     */
+    private fun colorFromArray(array: PdfArray?, colorSpace: String): Int {
+        if (array == null) return Color.BLACK
+        
+        return when (colorSpace) {
+            "DeviceGray" -> {
+                val gray = (array.getFloat(0) ?: 0f) * 255
+                Color.rgb(gray.toInt(), gray.toInt(), gray.toInt())
+            }
+            "DeviceRGB" -> {
+                val r = ((array.getFloat(0) ?: 0f) * 255).toInt().coerceIn(0, 255)
+                val g = ((array.getFloat(1) ?: 0f) * 255).toInt().coerceIn(0, 255)
+                val b = ((array.getFloat(2) ?: 0f) * 255).toInt().coerceIn(0, 255)
+                Color.rgb(r, g, b)
+            }
+            "DeviceCMYK" -> {
+                val c = array.getFloat(0) ?: 0f
+                val m = array.getFloat(1) ?: 0f
+                val y = array.getFloat(2) ?: 0f
+                val k = array.getFloat(3) ?: 0f
+                cmykToRgb(c, m, y, k)
+            }
+            else -> Color.BLACK
+        }
+    }
+    
+    /**
+     * CMYK 转 RGB
+     */
+    private fun cmykToRgb(c: Float, m: Float, y: Float, k: Float): Int {
+        val r = ((1 - c) * (1 - k) * 255).toInt().coerceIn(0, 255)
+        val g = ((1 - m) * (1 - k) * 255).toInt().coerceIn(0, 255)
+        val b = ((1 - y) * (1 - k) * 255).toInt().coerceIn(0, 255)
+        return Color.rgb(r, g, b)
     }
     
     private fun concatMatrix(operands: List<PdfObject>) {
@@ -431,23 +800,27 @@ private class RenderState(
     // ==================== 路径绑制 ====================
     
     private fun stroke() {
+        applyPendingClip()
         canvas.drawPath(currentPath, strokePaint)
         currentPath.reset()
     }
     
     private fun closeAndStroke() {
         currentPath.close()
+        applyPendingClip()
         canvas.drawPath(currentPath, strokePaint)
         currentPath.reset()
     }
     
     private fun fill(fillType: Path.FillType) {
+        applyPendingClip()
         currentPath.fillType = fillType
         canvas.drawPath(currentPath, fillPaint)
         currentPath.reset()
     }
     
     private fun fillAndStroke(fillType: Path.FillType) {
+        applyPendingClip()
         currentPath.fillType = fillType
         canvas.drawPath(currentPath, fillPaint)
         canvas.drawPath(currentPath, strokePaint)
@@ -456,6 +829,7 @@ private class RenderState(
     
     private fun closeAndFillStroke(fillType: Path.FillType) {
         currentPath.close()
+        applyPendingClip()
         currentPath.fillType = fillType
         canvas.drawPath(currentPath, fillPaint)
         canvas.drawPath(currentPath, strokePaint)
@@ -463,12 +837,28 @@ private class RenderState(
     }
     
     private fun endPath() {
+        // 在路径结束时应用待处理的裁切
+        applyPendingClip()
         currentPath.reset()
     }
     
     private fun clip(fillType: Path.FillType) {
-        currentPath.fillType = fillType
-        canvas.clipPath(currentPath)
+        // 延迟应用裁切，在路径结束操作符后生效
+        pendingClip = fillType
+    }
+    
+    /**
+     * 应用待处理的裁切路径
+     */
+    private fun applyPendingClip() {
+        pendingClip?.let { fillType ->
+            if (!currentPath.isEmpty) {
+                val clipPath = Path(currentPath)
+                clipPath.fillType = fillType
+                canvas.clipPath(clipPath)
+            }
+        }
+        pendingClip = null
     }
     
     // ==================== 颜色 ====================
@@ -535,26 +925,223 @@ private class RenderState(
     }
     
     private fun setFillColorSpace(operands: List<PdfObject>) {
-        // TODO: 实现色彩空间
+        if (operands.isEmpty()) return
+        val csName = (operands[0] as? PdfName)?.name ?: return
+        currentState.fillColorSpace = parseColorSpace(csName)
     }
     
     private fun setStrokeColorSpace(operands: List<PdfObject>) {
-        // TODO: 实现色彩空间
+        if (operands.isEmpty()) return
+        val csName = (operands[0] as? PdfName)?.name ?: return
+        currentState.strokeColorSpace = parseColorSpace(csName)
     }
     
-    private fun setFillColor(operands: List<PdfObject>) {
-        when (operands.size) {
-            1 -> setFillGray(operands)
-            3 -> setFillRGB(operands)
-            4 -> setFillCMYK(operands)
+    /**
+     * 解析颜色空间
+     */
+    private fun parseColorSpace(name: String): ColorSpaceInfo {
+        return when (name) {
+            "DeviceGray", "G" -> ColorSpaceInfo.DeviceGray
+            "DeviceRGB", "RGB" -> ColorSpaceInfo.DeviceRGB
+            "DeviceCMYK", "CMYK" -> ColorSpaceInfo.DeviceCMYK
+            "Pattern" -> ColorSpaceInfo.Pattern(null)
+            else -> {
+                // 查找资源中的颜色空间定义
+                val csDict = when (val cs = resources["ColorSpace"]) {
+                    is PdfDictionary -> cs
+                    is PdfIndirectRef -> document.getObject(cs) as? PdfDictionary
+                    else -> null
+                }
+                
+                val csObj = csDict?.get(name)?.let { resolveObject(it) }
+                parseColorSpaceObject(csObj) ?: ColorSpaceInfo.DeviceRGB
+            }
         }
     }
     
+    /**
+     * 解析颜色空间对象
+     */
+    private fun parseColorSpaceObject(obj: PdfObject?): ColorSpaceInfo? {
+        return when (obj) {
+            is PdfName -> parseColorSpace(obj.name)
+            is PdfArray -> {
+                val csType = (obj.firstOrNull() as? PdfName)?.name ?: return null
+                when (csType) {
+                    "Indexed", "I" -> {
+                        if (obj.size < 4) return null
+                        val base = parseColorSpaceObject(obj[1])
+                        val hival = (obj[2] as? PdfNumber)?.toInt() ?: 255
+                        val lookup = when (val lookupObj = resolveObject(obj[3])) {
+                            is PdfString -> lookupObj.toBytes()
+                            is PdfStream -> decodeStream(lookupObj)
+                            else -> ByteArray(0)
+                        }
+                        if (base != null) {
+                            ColorSpaceInfo.Indexed(base, hival, lookup)
+                        } else null
+                    }
+                    "ICCBased" -> {
+                        val profileStream = resolveObject(obj.getOrNull(1)) as? PdfStream
+                        val n = profileStream?.dict?.getInt("N") ?: 3
+                        val alternate = profileStream?.dict?.get("Alternate")?.let {
+                            parseColorSpaceObject(resolveObject(it))
+                        }
+                        ColorSpaceInfo.ICCBased(n, alternate)
+                    }
+                    "Separation" -> {
+                        if (obj.size < 4) return null
+                        val sepName = (obj[1] as? PdfName)?.name ?: ""
+                        val alternate = parseColorSpaceObject(obj[2])
+                        val tintTransform = obj[3]
+                        if (alternate != null) {
+                            ColorSpaceInfo.Separation(sepName, alternate, tintTransform)
+                        } else null
+                    }
+                    "DeviceN" -> {
+                        if (obj.size < 4) return null
+                        val names = (obj[1] as? PdfArray)?.mapNotNull { (it as? PdfName)?.name } ?: emptyList()
+                        val alternate = parseColorSpaceObject(obj[2])
+                        val tintTransform = obj[3]
+                        if (alternate != null) {
+                            ColorSpaceInfo.DeviceN(names, alternate, tintTransform)
+                        } else null
+                    }
+                    "Pattern" -> {
+                        val underlying = if (obj.size > 1) {
+                            parseColorSpaceObject(obj[1])
+                        } else null
+                        ColorSpaceInfo.Pattern(underlying)
+                    }
+                    "DeviceGray" -> ColorSpaceInfo.DeviceGray
+                    "DeviceRGB" -> ColorSpaceInfo.DeviceRGB
+                    "DeviceCMYK" -> ColorSpaceInfo.DeviceCMYK
+                    "CalGray", "CalRGB", "Lab" -> {
+                        // 简化处理：映射到设备颜色空间
+                        when (csType) {
+                            "CalGray" -> ColorSpaceInfo.DeviceGray
+                            else -> ColorSpaceInfo.DeviceRGB
+                        }
+                    }
+                    else -> null
+                }
+            }
+            else -> null
+        }
+    }
+    
+    /**
+     * 解析对象引用
+     */
+    private fun resolveObject(obj: PdfObject?): PdfObject? {
+        return when (obj) {
+            is PdfIndirectRef -> document.getObject(obj)
+            else -> obj
+        }
+    }
+    
+    private fun setFillColor(operands: List<PdfObject>) {
+        val color = convertColorSpace(operands, currentState.fillColorSpace)
+        currentState.fillColor = color
+        fillPaint.color = color
+        fillPaint.alpha = (currentState.fillAlpha * 255).toInt()
+        textPaint.color = color
+        textPaint.alpha = (currentState.fillAlpha * 255).toInt()
+    }
+    
     private fun setStrokeColor(operands: List<PdfObject>) {
-        when (operands.size) {
-            1 -> setStrokeGray(operands)
-            3 -> setStrokeRGB(operands)
-            4 -> setStrokeCMYK(operands)
+        val color = convertColorSpace(operands, currentState.strokeColorSpace)
+        currentState.strokeColor = color
+        strokePaint.color = color
+        strokePaint.alpha = (currentState.strokeAlpha * 255).toInt()
+    }
+    
+    /**
+     * 根据颜色空间转换颜色
+     */
+    private fun convertColorSpace(operands: List<PdfObject>, colorSpace: ColorSpaceInfo): Int {
+        return when (colorSpace) {
+            is ColorSpaceInfo.DeviceGray -> {
+                val gray = ((operands.firstOrNull() as? PdfNumber)?.toFloat() ?: 0f)
+                val grayInt = (gray * 255).toInt().coerceIn(0, 255)
+                Color.rgb(grayInt, grayInt, grayInt)
+            }
+            is ColorSpaceInfo.DeviceRGB -> {
+                if (operands.size < 3) return Color.BLACK
+                val r = ((operands[0] as? PdfNumber)?.toFloat() ?: 0f)
+                val g = ((operands[1] as? PdfNumber)?.toFloat() ?: 0f)
+                val b = ((operands[2] as? PdfNumber)?.toFloat() ?: 0f)
+                Color.rgb(
+                    (r * 255).toInt().coerceIn(0, 255),
+                    (g * 255).toInt().coerceIn(0, 255),
+                    (b * 255).toInt().coerceIn(0, 255)
+                )
+            }
+            is ColorSpaceInfo.DeviceCMYK -> {
+                if (operands.size < 4) return Color.BLACK
+                val c = (operands[0] as? PdfNumber)?.toFloat() ?: 0f
+                val m = (operands[1] as? PdfNumber)?.toFloat() ?: 0f
+                val y = (operands[2] as? PdfNumber)?.toFloat() ?: 0f
+                val k = (operands[3] as? PdfNumber)?.toFloat() ?: 0f
+                cmykToRgb(c, m, y, k)
+            }
+            is ColorSpaceInfo.Indexed -> {
+                val index = ((operands.firstOrNull() as? PdfNumber)?.toInt() ?: 0)
+                    .coerceIn(0, colorSpace.hival)
+                lookupIndexedColor(colorSpace, index)
+            }
+            is ColorSpaceInfo.ICCBased -> {
+                // 简化处理：根据组件数量映射到设备颜色空间
+                when (colorSpace.numComponents) {
+                    1 -> convertColorSpace(operands, ColorSpaceInfo.DeviceGray)
+                    3 -> convertColorSpace(operands, ColorSpaceInfo.DeviceRGB)
+                    4 -> convertColorSpace(operands, ColorSpaceInfo.DeviceCMYK)
+                    else -> Color.BLACK
+                }
+            }
+            is ColorSpaceInfo.Separation, is ColorSpaceInfo.DeviceN -> {
+                // 简化处理：使用灰度近似
+                val tint = (operands.firstOrNull() as? PdfNumber)?.toFloat() ?: 0f
+                val grayInt = ((1 - tint) * 255).toInt().coerceIn(0, 255)
+                Color.rgb(grayInt, grayInt, grayInt)
+            }
+            is ColorSpaceInfo.Pattern -> {
+                // Pattern 颜色空间需要特殊处理
+                Color.TRANSPARENT
+            }
+        }
+    }
+    
+    /**
+     * 从索引颜色空间查表获取颜色
+     */
+    private fun lookupIndexedColor(colorSpace: ColorSpaceInfo.Indexed, index: Int): Int {
+        val lookup = colorSpace.lookup
+        
+        return when (colorSpace.base) {
+            is ColorSpaceInfo.DeviceGray -> {
+                if (index >= lookup.size) return Color.BLACK
+                val gray = lookup[index].toInt() and 0xFF
+                Color.rgb(gray, gray, gray)
+            }
+            is ColorSpaceInfo.DeviceRGB -> {
+                val offset = index * 3
+                if (offset + 2 >= lookup.size) return Color.BLACK
+                val r = lookup[offset].toInt() and 0xFF
+                val g = lookup[offset + 1].toInt() and 0xFF
+                val b = lookup[offset + 2].toInt() and 0xFF
+                Color.rgb(r, g, b)
+            }
+            is ColorSpaceInfo.DeviceCMYK -> {
+                val offset = index * 4
+                if (offset + 3 >= lookup.size) return Color.BLACK
+                val c = (lookup[offset].toInt() and 0xFF) / 255f
+                val m = (lookup[offset + 1].toInt() and 0xFF) / 255f
+                val y = (lookup[offset + 2].toInt() and 0xFF) / 255f
+                val k = (lookup[offset + 3].toInt() and 0xFF) / 255f
+                cmykToRgb(c, m, y, k)
+            }
+            else -> Color.BLACK
         }
     }
     
@@ -578,6 +1165,20 @@ private class RenderState(
         currentState.fontSize = size
         currentState.font = fonts[name]
         textPaint.textSize = size
+        
+        // 尝试使用嵌入字体
+        val font = currentState.font
+        if (font is SimpleFont && font.hasEmbeddedFont()) {
+            val typeface = FontMapper.createFromEmbedded(font)
+            if (typeface != null) {
+                textPaint.typeface = typeface
+                return
+            }
+        }
+        
+        // 回退：根据字体的 BaseFont 名称设置正确的 Typeface（字体样式）
+        val baseFont = font?.baseFont ?: ""
+        textPaint.typeface = FontMapper.mapToTypeface(baseFont)
     }
     
     private fun setCharSpace(operands: List<PdfObject>) {
@@ -739,41 +1340,340 @@ private class RenderState(
         val width = stream.dict.getInt("Width") ?: return
         val height = stream.dict.getInt("Height") ?: return
         val bpc = stream.dict.getInt("BitsPerComponent") ?: 8
-        val colorSpace = stream.dict.getNameValue("ColorSpace") ?: "DeviceRGB"
+        
+        // 解析颜色空间
+        val colorSpaceObj = stream.dict["ColorSpace"]
+        val colorSpaceInfo = when (colorSpaceObj) {
+            is PdfName -> parseColorSpace(colorSpaceObj.name)
+            is PdfArray -> parseColorSpaceObject(colorSpaceObj)
+            is PdfIndirectRef -> parseColorSpaceObject(document.getObject(colorSpaceObj))
+            else -> ColorSpaceInfo.DeviceRGB
+        } ?: ColorSpaceInfo.DeviceRGB
         
         // 解码图像数据
         val data = decodeStream(stream)
         
         // 创建 Bitmap
-        val bitmap = try {
+        var bitmap = try {
             when {
                 // DCT (JPEG) - 直接解码
                 stream.getFilters().any { it in listOf("DCTDecode", "DCT") } -> {
                     BitmapFactory.decodeByteArray(stream.rawData, 0, stream.rawData.size)
                 }
-                // RGB
-                colorSpace == "DeviceRGB" && bpc == 8 -> {
-                    createRGBBitmap(data, width, height)
+                // JPX (JPEG 2000) - 直接解码
+                stream.getFilters().any { it in listOf("JPXDecode") } -> {
+                    BitmapFactory.decodeByteArray(stream.rawData, 0, stream.rawData.size)
                 }
-                // Gray
-                colorSpace == "DeviceGray" && bpc == 8 -> {
-                    createGrayBitmap(data, width, height)
-                }
-                else -> null
+                // 根据颜色空间创建 Bitmap
+                else -> createBitmapFromColorSpace(data, width, height, bpc, colorSpaceInfo)
             }
         } catch (e: Exception) {
             null
         }
         
-        bitmap?.let {
-            val rect = RectF(0f, 0f, 1f, 1f)
-            // 图像坐标系也是 Y 向上的，需要翻转
-            canvas.save()
-            canvas.scale(1f, -1f)
-            canvas.translate(0f, -1f)
-            canvas.drawBitmap(it, null, rect, null)
-            canvas.restore()
+        if (bitmap == null) return
+        
+        // 处理软遮罩 (SMask) - 实现虚化效果
+        val smask = stream.dict["SMask"]
+        if (smask != null) {
+            bitmap = applyImageSoftMask(bitmap, smask)
         }
+        
+        // 处理硬遮罩 (Mask)
+        val mask = stream.dict["Mask"]
+        if (mask != null) {
+            bitmap = applyImageMask(bitmap, mask)
+        }
+        
+        // 应用图形状态的软遮罩
+        if (currentState.softMask != null) {
+            // TODO: 应用图形状态级别的软遮罩
+        }
+        
+        val paint = Paint().apply {
+            isAntiAlias = true
+            alpha = (currentState.fillAlpha * 255).toInt()
+        }
+        
+        val rect = RectF(0f, 0f, 1f, 1f)
+        // 图像坐标系也是 Y 向上的，需要翻转
+        canvas.save()
+        canvas.scale(1f, -1f)
+        canvas.translate(0f, -1f)
+        canvas.drawBitmap(bitmap, null, rect, paint)
+        canvas.restore()
+    }
+    
+    /**
+     * 根据颜色空间创建 Bitmap
+     */
+    private fun createBitmapFromColorSpace(
+        data: ByteArray,
+        width: Int,
+        height: Int,
+        bpc: Int,
+        colorSpace: ColorSpaceInfo
+    ): Bitmap? {
+        return when (colorSpace) {
+            is ColorSpaceInfo.DeviceGray -> createGrayBitmap(data, width, height, bpc)
+            is ColorSpaceInfo.DeviceRGB -> createRGBBitmap(data, width, height)
+            is ColorSpaceInfo.DeviceCMYK -> createCMYKBitmap(data, width, height)
+            is ColorSpaceInfo.Indexed -> createIndexedBitmap(data, width, height, bpc, colorSpace)
+            is ColorSpaceInfo.ICCBased -> {
+                when (colorSpace.numComponents) {
+                    1 -> createGrayBitmap(data, width, height, bpc)
+                    3 -> createRGBBitmap(data, width, height)
+                    4 -> createCMYKBitmap(data, width, height)
+                    else -> null
+                }
+            }
+            is ColorSpaceInfo.Separation, is ColorSpaceInfo.DeviceN -> {
+                // 简化处理：当作灰度
+                createGrayBitmap(data, width, height, bpc)
+            }
+            is ColorSpaceInfo.Pattern -> null
+        }
+    }
+    
+    /**
+     * 创建索引颜色空间的 Bitmap
+     */
+    private fun createIndexedBitmap(
+        data: ByteArray,
+        width: Int,
+        height: Int,
+        bpc: Int,
+        colorSpace: ColorSpaceInfo.Indexed
+    ): Bitmap? {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(width * height)
+        
+        when (bpc) {
+            8 -> {
+                for (i in pixels.indices) {
+                    if (i >= data.size) break
+                    val index = data[i].toInt() and 0xFF
+                    pixels[i] = lookupIndexedColor(colorSpace, index.coerceIn(0, colorSpace.hival))
+                }
+            }
+            4 -> {
+                for (i in pixels.indices) {
+                    val byteIndex = i / 2
+                    if (byteIndex >= data.size) break
+                    val b = data[byteIndex].toInt() and 0xFF
+                    val index = if (i % 2 == 0) (b shr 4) else (b and 0x0F)
+                    pixels[i] = lookupIndexedColor(colorSpace, index.coerceIn(0, colorSpace.hival))
+                }
+            }
+            2 -> {
+                for (i in pixels.indices) {
+                    val byteIndex = i / 4
+                    if (byteIndex >= data.size) break
+                    val b = data[byteIndex].toInt() and 0xFF
+                    val shift = 6 - (i % 4) * 2
+                    val index = (b shr shift) and 0x03
+                    pixels[i] = lookupIndexedColor(colorSpace, index.coerceIn(0, colorSpace.hival))
+                }
+            }
+            1 -> {
+                for (i in pixels.indices) {
+                    val byteIndex = i / 8
+                    if (byteIndex >= data.size) break
+                    val b = data[byteIndex].toInt() and 0xFF
+                    val bit = 7 - (i % 8)
+                    val index = (b shr bit) and 0x01
+                    pixels[i] = lookupIndexedColor(colorSpace, index.coerceIn(0, colorSpace.hival))
+                }
+            }
+            else -> return null
+        }
+        
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        return bitmap
+    }
+    
+    /**
+     * 创建 CMYK Bitmap
+     */
+    private fun createCMYKBitmap(data: ByteArray, width: Int, height: Int): Bitmap? {
+        if (data.size < width * height * 4) return null
+        
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(width * height)
+        
+        for (i in pixels.indices) {
+            val offset = i * 4
+            if (offset + 3 >= data.size) break
+            val c = (data[offset].toInt() and 0xFF) / 255f
+            val m = (data[offset + 1].toInt() and 0xFF) / 255f
+            val y = (data[offset + 2].toInt() and 0xFF) / 255f
+            val k = (data[offset + 3].toInt() and 0xFF) / 255f
+            pixels[i] = cmykToRgb(c, m, y, k)
+        }
+        
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        return bitmap
+    }
+    
+    /**
+     * 应用软遮罩 (SMask) - 实现虚化/透明效果
+     */
+    private fun applyImageSoftMask(bitmap: Bitmap, smaskObj: PdfObject): Bitmap {
+        val smaskStream = when (smaskObj) {
+            is PdfStream -> smaskObj
+            is PdfIndirectRef -> document.getObject(smaskObj) as? PdfStream
+            else -> null
+        } ?: return bitmap
+        
+        val smaskWidth = smaskStream.dict.getInt("Width") ?: bitmap.width
+        val smaskHeight = smaskStream.dict.getInt("Height") ?: bitmap.height
+        val smaskBpc = smaskStream.dict.getInt("BitsPerComponent") ?: 8
+        
+        val smaskData = decodeStream(smaskStream)
+        val smaskBitmap = createGrayBitmap(smaskData, smaskWidth, smaskHeight, smaskBpc)
+            ?: return bitmap
+        
+        // 创建结果 Bitmap
+        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val resultCanvas = Canvas(result)
+        
+        // 绘制原始图像
+        resultCanvas.drawBitmap(bitmap, 0f, 0f, null)
+        
+        // 使用软遮罩设置透明度
+        val scaledMask = Bitmap.createScaledBitmap(smaskBitmap, bitmap.width, bitmap.height, true)
+        
+        val maskPaint = Paint().apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        }
+        
+        // 将灰度遮罩转换为 alpha 遮罩
+        val alphaPixels = IntArray(scaledMask.width * scaledMask.height)
+        scaledMask.getPixels(alphaPixels, 0, scaledMask.width, 0, 0, scaledMask.width, scaledMask.height)
+        
+        for (i in alphaPixels.indices) {
+            val gray = Color.red(alphaPixels[i])  // 灰度图的 R=G=B
+            alphaPixels[i] = Color.argb(gray, 255, 255, 255)
+        }
+        
+        val alphaMask = Bitmap.createBitmap(scaledMask.width, scaledMask.height, Bitmap.Config.ARGB_8888)
+        alphaMask.setPixels(alphaPixels, 0, scaledMask.width, 0, 0, scaledMask.width, scaledMask.height)
+        
+        resultCanvas.drawBitmap(alphaMask, 0f, 0f, maskPaint)
+        
+        return result
+    }
+    
+    /**
+     * 应用硬遮罩 (Mask)
+     */
+    private fun applyImageMask(bitmap: Bitmap, maskObj: PdfObject): Bitmap {
+        return when (maskObj) {
+            is PdfArray -> {
+                // 颜色键遮罩：指定透明的颜色范围
+                applyColorKeyMask(bitmap, maskObj)
+            }
+            is PdfStream, is PdfIndirectRef -> {
+                // 显式遮罩
+                val maskStream = when (maskObj) {
+                    is PdfStream -> maskObj
+                    is PdfIndirectRef -> document.getObject(maskObj) as? PdfStream
+                    else -> null
+                } ?: return bitmap
+                
+                applyExplicitMask(bitmap, maskStream)
+            }
+            else -> bitmap
+        }
+    }
+    
+    /**
+     * 应用颜色键遮罩
+     */
+    private fun applyColorKeyMask(bitmap: Bitmap, colorKey: PdfArray): Bitmap {
+        if (colorKey.isEmpty()) return bitmap
+        
+        val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val pixels = IntArray(result.width * result.height)
+        result.getPixels(pixels, 0, result.width, 0, 0, result.width, result.height)
+        
+        // 解析颜色键范围
+        val ranges = mutableListOf<Pair<Int, Int>>()
+        var i = 0
+        while (i + 1 < colorKey.size) {
+            val min = (colorKey.getNumber(i)?.toInt() ?: 0)
+            val max = (colorKey.getNumber(i + 1)?.toInt() ?: 255)
+            ranges.add(min to max)
+            i += 2
+        }
+        
+        for (j in pixels.indices) {
+            val color = pixels[j]
+            val r = Color.red(color)
+            val g = Color.green(color)
+            val b = Color.blue(color)
+            
+            val components = listOf(r, g, b)
+            var transparent = true
+            
+            for (k in ranges.indices) {
+                if (k < components.size) {
+                    val (min, max) = ranges[k]
+                    if (components[k] < min || components[k] > max) {
+                        transparent = false
+                        break
+                    }
+                }
+            }
+            
+            if (transparent) {
+                pixels[j] = Color.TRANSPARENT
+            }
+        }
+        
+        result.setPixels(pixels, 0, result.width, 0, 0, result.width, result.height)
+        return result
+    }
+    
+    /**
+     * 应用显式遮罩
+     */
+    private fun applyExplicitMask(bitmap: Bitmap, maskStream: PdfStream): Bitmap {
+        val maskWidth = maskStream.dict.getInt("Width") ?: bitmap.width
+        val maskHeight = maskStream.dict.getInt("Height") ?: bitmap.height
+        
+        val maskData = decodeStream(maskStream)
+        
+        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(result.width * result.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        
+        // 缩放遮罩到图像尺寸
+        val scaleX = maskWidth.toFloat() / bitmap.width
+        val scaleY = maskHeight.toFloat() / bitmap.height
+        
+        for (y in 0 until bitmap.height) {
+            for (x in 0 until bitmap.width) {
+                val maskX = (x * scaleX).toInt().coerceIn(0, maskWidth - 1)
+                val maskY = (y * scaleY).toInt().coerceIn(0, maskHeight - 1)
+                
+                val byteIndex = maskY * ((maskWidth + 7) / 8) + maskX / 8
+                val bitIndex = 7 - (maskX % 8)
+                
+                val maskBit = if (byteIndex < maskData.size) {
+                    (maskData[byteIndex].toInt() shr bitIndex) and 0x01
+                } else 0
+                
+                val pixelIndex = y * bitmap.width + x
+                if (maskBit == 0) {
+                    // 遮罩位为 0 表示透明
+                    pixels[pixelIndex] = Color.TRANSPARENT
+                }
+            }
+        }
+        
+        result.setPixels(pixels, 0, result.width, 0, 0, result.width, result.height)
+        return result
     }
     
     private fun createRGBBitmap(data: ByteArray, width: Int, height: Int): Bitmap? {
@@ -795,16 +1695,61 @@ private class RenderState(
         return bitmap
     }
     
-    private fun createGrayBitmap(data: ByteArray, width: Int, height: Int): Bitmap? {
-        if (data.size < width * height) return null
-        
+    private fun createGrayBitmap(data: ByteArray, width: Int, height: Int, bpc: Int = 8): Bitmap? {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(width * height)
         
-        for (i in pixels.indices) {
-            if (i >= data.size) break
-            val gray = data[i].toInt() and 0xFF
-            pixels[i] = Color.rgb(gray, gray, gray)
+        when (bpc) {
+            8 -> {
+                if (data.size < width * height) return null
+                for (i in pixels.indices) {
+                    if (i >= data.size) break
+                    val gray = data[i].toInt() and 0xFF
+                    pixels[i] = Color.rgb(gray, gray, gray)
+                }
+            }
+            4 -> {
+                for (i in pixels.indices) {
+                    val byteIndex = i / 2
+                    if (byteIndex >= data.size) break
+                    val b = data[byteIndex].toInt() and 0xFF
+                    val value = if (i % 2 == 0) (b shr 4) else (b and 0x0F)
+                    val gray = value * 255 / 15
+                    pixels[i] = Color.rgb(gray, gray, gray)
+                }
+            }
+            2 -> {
+                for (i in pixels.indices) {
+                    val byteIndex = i / 4
+                    if (byteIndex >= data.size) break
+                    val b = data[byteIndex].toInt() and 0xFF
+                    val shift = 6 - (i % 4) * 2
+                    val value = (b shr shift) and 0x03
+                    val gray = value * 255 / 3
+                    pixels[i] = Color.rgb(gray, gray, gray)
+                }
+            }
+            1 -> {
+                for (i in pixels.indices) {
+                    val byteIndex = i / 8
+                    if (byteIndex >= data.size) break
+                    val b = data[byteIndex].toInt() and 0xFF
+                    val bit = 7 - (i % 8)
+                    val value = (b shr bit) and 0x01
+                    val gray = value * 255
+                    pixels[i] = Color.rgb(gray, gray, gray)
+                }
+            }
+            16 -> {
+                for (i in pixels.indices) {
+                    val byteIndex = i * 2
+                    if (byteIndex + 1 >= data.size) break
+                    // 16位灰度，取高8位
+                    val gray = data[byteIndex].toInt() and 0xFF
+                    pixels[i] = Color.rgb(gray, gray, gray)
+                }
+            }
+            else -> return null
         }
         
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
@@ -903,5 +1848,167 @@ private data class GraphicsState(
     var hScale: Float = 1f,
     var leading: Float = 0f,
     var rise: Float = 0f,
-    var renderMode: Int = 0
+    var renderMode: Int = 0,
+    // ExtGState 扩展字段
+    var fillAlpha: Float = 1f,
+    var strokeAlpha: Float = 1f,
+    var blendMode: PorterDuff.Mode = PorterDuff.Mode.SRC_OVER,
+    var softMask: PdfDictionary? = null,
+    // 颜色空间
+    var fillColorSpace: ColorSpaceInfo = ColorSpaceInfo.DeviceRGB,
+    var strokeColorSpace: ColorSpaceInfo = ColorSpaceInfo.DeviceRGB
 )
+
+/**
+ * 颜色空间信息
+ */
+private sealed class ColorSpaceInfo {
+    object DeviceGray : ColorSpaceInfo()
+    object DeviceRGB : ColorSpaceInfo()
+    object DeviceCMYK : ColorSpaceInfo()
+    data class Indexed(val base: ColorSpaceInfo, val hival: Int, val lookup: ByteArray) : ColorSpaceInfo()
+    data class ICCBased(val numComponents: Int, val alternateSpace: ColorSpaceInfo?) : ColorSpaceInfo()
+    data class Separation(val name: String, val alternateSpace: ColorSpaceInfo, val tintTransform: PdfObject?) : ColorSpaceInfo()
+    data class DeviceN(val names: List<String>, val alternateSpace: ColorSpaceInfo, val tintTransform: PdfObject?) : ColorSpaceInfo()
+    data class Pattern(val underlyingSpace: ColorSpaceInfo?) : ColorSpaceInfo()
+}
+
+/**
+ * PDF 字体映射器
+ * 
+ * 将 PDF 标准 14 字体（以及常见字体名称）映射到 Android 系统字体
+ * 根据 PDF 32000-1:2008 标准 9.6.2.2 节
+ */
+object FontMapper {
+    
+    // 嵌入字体 Typeface 缓存
+    private val embeddedTypefaceCache = mutableMapOf<String, Typeface?>()
+    
+    /**
+     * 从嵌入字体数据创建 Typeface
+     */
+    fun createFromEmbedded(font: SimpleFont): Typeface? {
+        val baseFont = font.baseFont
+        
+        // 检查缓存
+        if (embeddedTypefaceCache.containsKey(baseFont)) {
+            return embeddedTypefaceCache[baseFont]
+        }
+        
+        val embeddedFont = font.embeddedFont ?: return null
+        
+        // 只有 TrueType 和 OpenType 字体可以被 Android 直接使用
+        if (!embeddedFont.isAndroidCompatible()) {
+            embeddedTypefaceCache[baseFont] = null
+            return null
+        }
+        
+        val typeface = try {
+            // 创建临时文件
+            val tempFile = java.io.File.createTempFile(
+                "font_${baseFont.hashCode()}", 
+                ".${embeddedFont.getFileExtension()}"
+            )
+            tempFile.deleteOnExit()
+            
+            // 写入字体数据
+            tempFile.writeBytes(embeddedFont.data)
+            
+            // 从文件创建 Typeface
+            Typeface.createFromFile(tempFile)
+        } catch (e: Exception) {
+            // 如果创建失败，返回 null
+            null
+        }
+        
+        embeddedTypefaceCache[baseFont] = typeface
+        return typeface
+    }
+    
+    /**
+     * 将 PDF 字体的 BaseFont 名称映射到 Android Typeface
+     * 
+     * 支持的 PDF 标准 14 字体:
+     * - Times-Roman, Times-Bold, Times-Italic, Times-BoldItalic
+     * - Helvetica, Helvetica-Bold, Helvetica-Oblique, Helvetica-BoldOblique
+     * - Courier, Courier-Bold, Courier-Oblique, Courier-BoldOblique
+     * - Symbol, ZapfDingbats
+     */
+    fun mapToTypeface(baseFont: String): Typeface {
+        val name = baseFont.lowercase()
+        
+        // 确定字体家族
+        val family = when {
+            // 衬线字体 (Serif)
+            name.contains("times") -> Typeface.SERIF
+            name.contains("georgia") -> Typeface.SERIF
+            name.contains("palatino") -> Typeface.SERIF
+            name.contains("garamond") -> Typeface.SERIF
+            name.contains("bookman") -> Typeface.SERIF
+            name.contains("cambria") -> Typeface.SERIF
+            
+            // 无衬线字体 (Sans-serif)
+            name.contains("helvetica") -> Typeface.SANS_SERIF
+            name.contains("arial") -> Typeface.SANS_SERIF
+            name.contains("verdana") -> Typeface.SANS_SERIF
+            name.contains("tahoma") -> Typeface.SANS_SERIF
+            name.contains("calibri") -> Typeface.SANS_SERIF
+            name.contains("segoe") -> Typeface.SANS_SERIF
+            name.contains("roboto") -> Typeface.SANS_SERIF
+            name.contains("opensans") -> Typeface.SANS_SERIF
+            name.contains("sans") -> Typeface.SANS_SERIF
+            
+            // 等宽字体 (Monospace)
+            name.contains("courier") -> Typeface.MONOSPACE
+            name.contains("consolas") -> Typeface.MONOSPACE
+            name.contains("monaco") -> Typeface.MONOSPACE
+            name.contains("mono") -> Typeface.MONOSPACE
+            name.contains("menlo") -> Typeface.MONOSPACE
+            
+            // Symbol 和 ZapfDingbats - 使用默认字体（编码已在 StandardEncodings 中处理）
+            name.contains("symbol") -> Typeface.SERIF
+            name.contains("dingbats") -> Typeface.SERIF
+            name.contains("wingdings") -> Typeface.SERIF
+            
+            // 中文字体映射
+            name.contains("simsun") -> Typeface.SERIF      // 宋体
+            name.contains("simhei") -> Typeface.SANS_SERIF  // 黑体
+            name.contains("simkai") -> Typeface.SERIF       // 楷体
+            name.contains("fangsong") -> Typeface.SERIF     // 仿宋
+            name.contains("microsoft yahei") -> Typeface.SANS_SERIF
+            name.contains("nsimsun") -> Typeface.SERIF
+            name.contains("kaiti") -> Typeface.SERIF
+            name.contains("heiti") -> Typeface.SANS_SERIF
+            name.contains("songti") -> Typeface.SERIF
+            
+            // 日文字体映射
+            name.contains("mincho") -> Typeface.SERIF
+            name.contains("gothic") -> Typeface.SANS_SERIF
+            
+            // 默认使用无衬线字体
+            else -> Typeface.DEFAULT
+        }
+        
+        // 确定字体样式 (Bold, Italic)
+        val style = when {
+            // 粗斜体
+            (name.contains("bolditalic") || name.contains("boldoblique") ||
+             name.contains("bold") && (name.contains("italic") || name.contains("oblique")) ||
+             name.contains("bi") && name.length > 2 && name.endsWith("bi")) -> Typeface.BOLD_ITALIC
+            
+            // 粗体
+            name.contains("bold") || name.contains("-bd") || 
+            name.endsWith("bd") || name.contains("black") ||
+            name.contains("heavy") || name.contains("demi") -> Typeface.BOLD
+            
+            // 斜体
+            name.contains("italic") || name.contains("oblique") || 
+            name.contains("-it") || name.endsWith("it") -> Typeface.ITALIC
+            
+            // 正常
+            else -> Typeface.NORMAL
+        }
+        
+        return Typeface.create(family, style)
+    }
+}
