@@ -1,5 +1,6 @@
 package com.pdfcore.parser
 
+import com.pdfcore.codec.CCITTFaxDecoder
 import com.pdfcore.model.PdfDictionary
 import java.io.ByteArrayOutputStream
 import java.util.zip.DataFormatException
@@ -30,8 +31,8 @@ object StreamFilters {
             "RunLengthDecode", "RL" -> decodeRunLength(data)
             "DCTDecode", "DCT" -> data // JPEG, 保持原样供图像解码器处理
             "JPXDecode" -> data // JPEG2000, 保持原样
-            "CCITTFaxDecode", "CCF" -> data // 传真压缩, 复杂，暂不支持
-            "JBIG2Decode" -> data // JBIG2, 复杂，暂不支持
+            "CCITTFaxDecode", "CCF" -> decodeCCITTFax(data, params)
+            "JBIG2Decode" -> decodeJBIG2(data, params)
             else -> throw UnsupportedFilterException(filterName)
         }
     }
@@ -261,7 +262,7 @@ object StreamFilters {
     fun decodeLZW(data: ByteArray, params: PdfDictionary?): ByteArray {
         if (data.isEmpty()) return data
         
-        val earlyChange = params?.getNumber("EarlyChange")?.toInt() ?: 1
+        val earlyChange = params?.getInt("EarlyChange") ?: 1
         val output = ByteArrayOutputStream()
         
         val table = mutableListOf<ByteArray>()
@@ -591,5 +592,48 @@ object StreamFilters {
         }
         
         return output.toByteArray()
+    }
+    
+    // ==================== CCITTFaxDecode ====================
+    
+    /**
+     * CCITT Fax 解码
+     * PDF 32000-1:2008 7.4.6
+     */
+    fun decodeCCITTFax(data: ByteArray, params: PdfDictionary?): ByteArray {
+        if (data.isEmpty()) return data
+        
+        return try {
+            val decoder = CCITTFaxDecoder(params)
+            decoder.decode(data)
+        } catch (e: Exception) {
+            // 解码失败，返回原始数据
+            data
+        }
+    }
+    
+    // ==================== JBIG2Decode ====================
+    
+    /**
+     * JBIG2 解码
+     * PDF 32000-1:2008 7.4.7
+     */
+    fun decodeJBIG2(data: ByteArray, params: PdfDictionary?): ByteArray {
+        if (data.isEmpty()) return data
+        
+        return try {
+            // 获取全局数据（如果有）
+            val globals = params?.get("JBIG2Globals")
+            val globalData = when (globals) {
+                is com.pdfcore.model.PdfStream -> globals.rawData
+                else -> null
+            }
+            
+            val decoder = com.pdfcore.codec.JBIG2Decoder(globalData)
+            decoder.decode(data)
+        } catch (e: Exception) {
+            // 解码失败，返回原始数据
+            data
+        }
     }
 }

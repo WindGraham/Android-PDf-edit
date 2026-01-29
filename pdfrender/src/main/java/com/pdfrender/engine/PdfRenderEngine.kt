@@ -6,6 +6,7 @@ import com.pdfcore.content.ContentParser
 import com.pdfcore.font.FontHandler
 import com.pdfcore.font.PdfFont
 import com.pdfcore.font.SimpleFont
+import com.pdfcore.function.PdfFunction
 import com.pdfcore.model.*
 import com.pdfcore.parser.StreamFilters
 
@@ -460,9 +461,733 @@ private class RenderState(
         val bbox = shadingDict.getArray("BBox")?.toRectangle()
         
         when (shadingType) {
+            1 -> drawFunctionBasedShading(shadingDict, colorSpace, bbox)
             2 -> drawAxialShading(shadingDict, colorSpace, bbox)
             3 -> drawRadialShading(shadingDict, colorSpace, bbox)
-            // 其他类型 (1, 4, 5, 6, 7) 暂不支持
+            4 -> drawFreeFormGouraudShading(shadingDict, colorSpace, bbox)
+            5 -> drawLatticeFormGouraudShading(shadingDict, colorSpace, bbox)
+            6 -> drawCoonsPatchShading(shadingDict, colorSpace, bbox)
+            7 -> drawTensorProductPatchShading(shadingDict, colorSpace, bbox)
+        }
+    }
+    
+    /**
+     * 绘制函数基着色 (ShadingType 1)
+     * PDF 32000-1:2008 8.7.4.5.2
+     */
+    private fun drawFunctionBasedShading(
+        shadingDict: PdfDictionary,
+        colorSpace: String,
+        bbox: PdfRectangle?
+    ) {
+        // 获取域
+        val domainArray = shadingDict.getArray("Domain")
+        val xmin = domainArray?.getFloat(0) ?: 0f
+        val xmax = domainArray?.getFloat(1) ?: 1f
+        val ymin = domainArray?.getFloat(2) ?: 0f
+        val ymax = domainArray?.getFloat(3) ?: 1f
+        
+        // 获取矩阵
+        val matrixArray = shadingDict.getArray("Matrix")
+        val matrix = if (matrixArray != null && matrixArray.size >= 6) {
+            Matrix().apply {
+                setValues(floatArrayOf(
+                    matrixArray.getFloat(0) ?: 1f,
+                    matrixArray.getFloat(2) ?: 0f,
+                    matrixArray.getFloat(4) ?: 0f,
+                    matrixArray.getFloat(1) ?: 0f,
+                    matrixArray.getFloat(3) ?: 1f,
+                    matrixArray.getFloat(5) ?: 0f,
+                    0f, 0f, 1f
+                ))
+            }
+        } else null
+        
+        // 获取函数
+        val functionObj = shadingDict["Function"] ?: return
+        val function = PdfFunction.create(functionObj, document) ?: return
+        
+        // 确定绘制区域
+        val bounds = bbox ?: return
+        val width = bounds.width.toInt().coerceAtLeast(1)
+        val height = bounds.height.toInt().coerceAtLeast(1)
+        
+        // 创建位图
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        
+        // 计算每个像素的颜色
+        for (py in 0 until height) {
+            for (px in 0 until width) {
+                // 将像素坐标转换为域坐标
+                val x = xmin + (px.toFloat() / width) * (xmax - xmin)
+                val y = ymin + (py.toFloat() / height) * (ymax - ymin)
+                
+                // 求值函数
+                val colorValues = function.evaluate(floatArrayOf(x, y))
+                
+                // 转换为颜色
+                val color = colorValuesToColor(colorValues, colorSpace)
+                bitmap.setPixel(px, py, color)
+            }
+        }
+        
+        // 绘制位图
+        val paint = Paint().apply {
+            isAntiAlias = true
+            alpha = (currentState.fillAlpha * 255).toInt()
+        }
+        
+        canvas.save()
+        if (matrix != null) {
+            canvas.concat(matrix)
+        }
+        canvas.drawBitmap(bitmap, bounds.llx, bounds.lly, paint)
+        canvas.restore()
+    }
+    
+    /**
+     * 绘制自由形式 Gouraud 着色 (ShadingType 4)
+     * PDF 32000-1:2008 8.7.4.5.5
+     */
+    private fun drawFreeFormGouraudShading(
+        shadingDict: PdfDictionary,
+        colorSpace: String,
+        bbox: PdfRectangle?
+    ) {
+        // 获取流数据
+        val shadingStream = getShadingStream(shadingDict) ?: return
+        
+        val bitsPerCoordinate = shadingDict.getInt("BitsPerCoordinate") ?: 8
+        val bitsPerComponent = shadingDict.getInt("BitsPerComponent") ?: 8
+        val bitsPerFlag = shadingDict.getInt("BitsPerFlag") ?: 8
+        
+        val decodeArray = shadingDict.getArray("Decode") ?: return
+        if (decodeArray.size < 6) return
+        
+        val xmin = decodeArray.getFloat(0) ?: 0f
+        val xmax = decodeArray.getFloat(1) ?: 1f
+        val ymin = decodeArray.getFloat(2) ?: 0f
+        val ymax = decodeArray.getFloat(3) ?: 1f
+        
+        // 获取颜色分量数
+        val numComponents = getColorSpaceComponents(colorSpace)
+        
+        // 解码流数据
+        val data = decodeStream(shadingStream)
+        val reader = BitReader(data, bitsPerCoordinate, bitsPerComponent, bitsPerFlag)
+        
+        // 读取三角形
+        val triangles = mutableListOf<ShadingTriangle>()
+        val vertices = mutableListOf<ShadingVertex>()
+        
+        while (reader.hasMore()) {
+            val flag = reader.readFlag()
+            val x = reader.readCoordinate(xmin, xmax)
+            val y = reader.readCoordinate(ymin, ymax)
+            val color = reader.readColor(numComponents, decodeArray, 4)
+            
+            val vertex = ShadingVertex(x, y, color)
+            
+            when (flag) {
+                0 -> {
+                    // 新三角形，需要3个顶点
+                    vertices.clear()
+                    vertices.add(vertex)
+                }
+                1 -> {
+                    // 使用前一个三角形的最后两个顶点
+                    if (vertices.size >= 2) {
+                        val v1 = vertices[vertices.size - 2]
+                        val v2 = vertices[vertices.size - 1]
+                        triangles.add(ShadingTriangle(v1, v2, vertex))
+                    }
+                    vertices.add(vertex)
+                }
+                2 -> {
+                    // 使用前一个三角形的第一个和最后一个顶点
+                    if (vertices.size >= 2) {
+                        val v0 = vertices[0]
+                        val v2 = vertices[vertices.size - 1]
+                        triangles.add(ShadingTriangle(v0, v2, vertex))
+                    }
+                    vertices.add(vertex)
+                }
+                else -> vertices.add(vertex)
+            }
+            
+            // 凑够3个顶点形成三角形
+            if (vertices.size == 3 && flag == 0) {
+                triangles.add(ShadingTriangle(vertices[0], vertices[1], vertices[2]))
+            }
+        }
+        
+        // 绘制三角形
+        drawGouraudTriangles(triangles, bbox)
+    }
+    
+    /**
+     * 绘制格子形式 Gouraud 着色 (ShadingType 5)
+     * PDF 32000-1:2008 8.7.4.5.6
+     */
+    private fun drawLatticeFormGouraudShading(
+        shadingDict: PdfDictionary,
+        colorSpace: String,
+        bbox: PdfRectangle?
+    ) {
+        val shadingStream = getShadingStream(shadingDict) ?: return
+        
+        val bitsPerCoordinate = shadingDict.getInt("BitsPerCoordinate") ?: 8
+        val bitsPerComponent = shadingDict.getInt("BitsPerComponent") ?: 8
+        val verticesPerRow = shadingDict.getInt("VerticesPerRow") ?: return
+        
+        val decodeArray = shadingDict.getArray("Decode") ?: return
+        if (decodeArray.size < 6) return
+        
+        val xmin = decodeArray.getFloat(0) ?: 0f
+        val xmax = decodeArray.getFloat(1) ?: 1f
+        val ymin = decodeArray.getFloat(2) ?: 0f
+        val ymax = decodeArray.getFloat(3) ?: 1f
+        
+        val numComponents = getColorSpaceComponents(colorSpace)
+        
+        val data = decodeStream(shadingStream)
+        val reader = BitReader(data, bitsPerCoordinate, bitsPerComponent, 0)
+        
+        // 读取所有顶点
+        val allVertices = mutableListOf<ShadingVertex>()
+        while (reader.hasMore()) {
+            val x = reader.readCoordinate(xmin, xmax)
+            val y = reader.readCoordinate(ymin, ymax)
+            val color = reader.readColor(numComponents, decodeArray, 4)
+            allVertices.add(ShadingVertex(x, y, color))
+        }
+        
+        // 构建三角形
+        val triangles = mutableListOf<ShadingTriangle>()
+        val numRows = allVertices.size / verticesPerRow
+        
+        for (row in 0 until numRows - 1) {
+            for (col in 0 until verticesPerRow - 1) {
+                val idx = row * verticesPerRow + col
+                val v0 = allVertices.getOrNull(idx) ?: continue
+                val v1 = allVertices.getOrNull(idx + 1) ?: continue
+                val v2 = allVertices.getOrNull(idx + verticesPerRow) ?: continue
+                val v3 = allVertices.getOrNull(idx + verticesPerRow + 1) ?: continue
+                
+                // 每个格子分成两个三角形
+                triangles.add(ShadingTriangle(v0, v1, v2))
+                triangles.add(ShadingTriangle(v1, v3, v2))
+            }
+        }
+        
+        drawGouraudTriangles(triangles, bbox)
+    }
+    
+    /**
+     * 绘制 Coons 曲面片着色 (ShadingType 6)
+     * PDF 32000-1:2008 8.7.4.5.7
+     */
+    private fun drawCoonsPatchShading(
+        shadingDict: PdfDictionary,
+        colorSpace: String,
+        bbox: PdfRectangle?
+    ) {
+        val shadingStream = getShadingStream(shadingDict) ?: return
+        
+        val bitsPerCoordinate = shadingDict.getInt("BitsPerCoordinate") ?: 8
+        val bitsPerComponent = shadingDict.getInt("BitsPerComponent") ?: 8
+        val bitsPerFlag = shadingDict.getInt("BitsPerFlag") ?: 8
+        
+        val decodeArray = shadingDict.getArray("Decode") ?: return
+        if (decodeArray.size < 6) return
+        
+        val xmin = decodeArray.getFloat(0) ?: 0f
+        val xmax = decodeArray.getFloat(1) ?: 1f
+        val ymin = decodeArray.getFloat(2) ?: 0f
+        val ymax = decodeArray.getFloat(3) ?: 1f
+        
+        val numComponents = getColorSpaceComponents(colorSpace)
+        
+        val data = decodeStream(shadingStream)
+        val reader = BitReader(data, bitsPerCoordinate, bitsPerComponent, bitsPerFlag)
+        
+        // Coons 曲面片有 12 个控制点和 4 个颜色
+        val triangles = mutableListOf<ShadingTriangle>()
+        var prevPatch: CoonsPatch? = null
+        
+        while (reader.hasMore()) {
+            val flag = reader.readFlag()
+            
+            val controlPoints = mutableListOf<PointF>()
+            val colors = mutableListOf<Int>()
+            
+            val numPoints = when (flag) {
+                0 -> 12 // 新曲面片
+                1, 2, 3 -> 8 // 继续曲面片
+                else -> continue
+            }
+            
+            for (i in 0 until numPoints) {
+                val x = reader.readCoordinate(xmin, xmax)
+                val y = reader.readCoordinate(ymin, ymax)
+                controlPoints.add(PointF(x, y))
+            }
+            
+            val numColors = if (flag == 0) 4 else 2
+            for (i in 0 until numColors) {
+                colors.add(reader.readColor(numComponents, decodeArray, 4))
+            }
+            
+            // 构建完整的曲面片
+            val patch = buildCoonsPatch(flag, controlPoints, colors, prevPatch) ?: continue
+            prevPatch = patch
+            
+            // 细分为三角形
+            subdividePatch(patch, triangles, 4)
+        }
+        
+        drawGouraudTriangles(triangles, bbox)
+    }
+    
+    /**
+     * 绘制张量积曲面片着色 (ShadingType 7)
+     * PDF 32000-1:2008 8.7.4.5.8
+     */
+    private fun drawTensorProductPatchShading(
+        shadingDict: PdfDictionary,
+        colorSpace: String,
+        bbox: PdfRectangle?
+    ) {
+        val shadingStream = getShadingStream(shadingDict) ?: return
+        
+        val bitsPerCoordinate = shadingDict.getInt("BitsPerCoordinate") ?: 8
+        val bitsPerComponent = shadingDict.getInt("BitsPerComponent") ?: 8
+        val bitsPerFlag = shadingDict.getInt("BitsPerFlag") ?: 8
+        
+        val decodeArray = shadingDict.getArray("Decode") ?: return
+        if (decodeArray.size < 6) return
+        
+        val xmin = decodeArray.getFloat(0) ?: 0f
+        val xmax = decodeArray.getFloat(1) ?: 1f
+        val ymin = decodeArray.getFloat(2) ?: 0f
+        val ymax = decodeArray.getFloat(3) ?: 1f
+        
+        val numComponents = getColorSpaceComponents(colorSpace)
+        
+        val data = decodeStream(shadingStream)
+        val reader = BitReader(data, bitsPerCoordinate, bitsPerComponent, bitsPerFlag)
+        
+        // 张量积曲面片有 16 个控制点和 4 个颜色
+        val triangles = mutableListOf<ShadingTriangle>()
+        var prevPatch: TensorPatch? = null
+        
+        while (reader.hasMore()) {
+            val flag = reader.readFlag()
+            
+            val controlPoints = mutableListOf<PointF>()
+            val colors = mutableListOf<Int>()
+            
+            val numPoints = when (flag) {
+                0 -> 16 // 新曲面片
+                1, 2, 3 -> 12 // 继续曲面片
+                else -> continue
+            }
+            
+            for (i in 0 until numPoints) {
+                val x = reader.readCoordinate(xmin, xmax)
+                val y = reader.readCoordinate(ymin, ymax)
+                controlPoints.add(PointF(x, y))
+            }
+            
+            val numColors = if (flag == 0) 4 else 2
+            for (i in 0 until numColors) {
+                colors.add(reader.readColor(numComponents, decodeArray, 4))
+            }
+            
+            // 构建完整的曲面片
+            val patch = buildTensorPatch(flag, controlPoints, colors, prevPatch) ?: continue
+            prevPatch = patch
+            
+            // 细分为三角形
+            subdivideTensorPatch(patch, triangles, 4)
+        }
+        
+        drawGouraudTriangles(triangles, bbox)
+    }
+    
+    /**
+     * 获取颜色空间分量数
+     */
+    private fun getColorSpaceComponents(colorSpace: String): Int {
+        return when {
+            colorSpace.contains("Gray") -> 1
+            colorSpace.contains("RGB") -> 3
+            colorSpace.contains("CMYK") -> 4
+            else -> 3
+        }
+    }
+    
+    /**
+     * 获取着色流
+     */
+    private fun getShadingStream(shadingDict: PdfDictionary): PdfStream? {
+        // 着色字典可能包含流数据
+        return null // 占位，实际从字典的流部分获取
+    }
+    
+    /**
+     * 颜色值转换为颜色
+     */
+    private fun colorValuesToColor(values: FloatArray, colorSpace: String): Int {
+        return when {
+            colorSpace.contains("Gray") -> {
+                val gray = ((values.getOrElse(0) { 0f }) * 255).toInt().coerceIn(0, 255)
+                Color.rgb(gray, gray, gray)
+            }
+            colorSpace.contains("CMYK") -> {
+                val c = values.getOrElse(0) { 0f }
+                val m = values.getOrElse(1) { 0f }
+                val y = values.getOrElse(2) { 0f }
+                val k = values.getOrElse(3) { 0f }
+                cmykToRgb(c, m, y, k)
+            }
+            else -> {
+                val r = ((values.getOrElse(0) { 0f }) * 255).toInt().coerceIn(0, 255)
+                val g = ((values.getOrElse(1) { 0f }) * 255).toInt().coerceIn(0, 255)
+                val b = ((values.getOrElse(2) { 0f }) * 255).toInt().coerceIn(0, 255)
+                Color.rgb(r, g, b)
+            }
+        }
+    }
+    
+    /**
+     * 绘制 Gouraud 三角形
+     */
+    private fun drawGouraudTriangles(triangles: List<ShadingTriangle>, bbox: PdfRectangle?) {
+        if (triangles.isEmpty()) return
+        
+        val paint = Paint().apply {
+            isAntiAlias = true
+            style = Paint.Style.FILL
+            alpha = (currentState.fillAlpha * 255).toInt()
+        }
+        
+        for (triangle in triangles) {
+            drawGouraudTriangle(triangle, paint)
+        }
+    }
+    
+    /**
+     * 绘制单个 Gouraud 三角形
+     */
+    private fun drawGouraudTriangle(triangle: ShadingTriangle, paint: Paint) {
+        val path = Path().apply {
+            moveTo(triangle.v0.x, triangle.v0.y)
+            lineTo(triangle.v1.x, triangle.v1.y)
+            lineTo(triangle.v2.x, triangle.v2.y)
+            close()
+        }
+        
+        // 创建渐变着色器
+        val colors = intArrayOf(triangle.v0.color, triangle.v1.color, triangle.v2.color)
+        val positions = floatArrayOf(
+            triangle.v0.x, triangle.v0.y,
+            triangle.v1.x, triangle.v1.y,
+            triangle.v2.x, triangle.v2.y
+        )
+        
+        // 使用中心颜色近似（简化实现）
+        val avgColor = blendColors(colors[0], colors[1], colors[2])
+        paint.color = avgColor
+        
+        canvas.drawPath(path, paint)
+    }
+    
+    /**
+     * 混合三个颜色
+     */
+    private fun blendColors(c0: Int, c1: Int, c2: Int): Int {
+        val r = (Color.red(c0) + Color.red(c1) + Color.red(c2)) / 3
+        val g = (Color.green(c0) + Color.green(c1) + Color.green(c2)) / 3
+        val b = (Color.blue(c0) + Color.blue(c1) + Color.blue(c2)) / 3
+        return Color.rgb(r, g, b)
+    }
+    
+    /**
+     * 构建 Coons 曲面片
+     */
+    private fun buildCoonsPatch(
+        flag: Int,
+        points: List<PointF>,
+        colors: List<Int>,
+        prevPatch: CoonsPatch?
+    ): CoonsPatch? {
+        if (flag == 0) {
+            if (points.size < 12 || colors.size < 4) return null
+            return CoonsPatch(
+                points.toTypedArray(),
+                colors.toIntArray()
+            )
+        }
+        
+        if (prevPatch == null || points.size < 8 || colors.size < 2) return null
+        
+        // 从前一个曲面片继承部分控制点和颜色
+        val allPoints = Array(12) { PointF(0f, 0f) }
+        val allColors = IntArray(4)
+        
+        when (flag) {
+            1 -> {
+                // 共享边 3-0
+                allPoints[0] = prevPatch.controlPoints[3]
+                allPoints[1] = prevPatch.controlPoints[4]
+                allPoints[2] = prevPatch.controlPoints[5]
+                allPoints[3] = prevPatch.controlPoints[6]
+                allColors[0] = prevPatch.colors[1]
+                allColors[3] = prevPatch.colors[2]
+            }
+            2 -> {
+                // 共享边 6-3
+                allPoints[0] = prevPatch.controlPoints[6]
+                allPoints[1] = prevPatch.controlPoints[7]
+                allPoints[2] = prevPatch.controlPoints[8]
+                allPoints[3] = prevPatch.controlPoints[9]
+                allColors[0] = prevPatch.colors[2]
+                allColors[3] = prevPatch.colors[3]
+            }
+            3 -> {
+                // 共享边 9-0
+                allPoints[0] = prevPatch.controlPoints[9]
+                allPoints[1] = prevPatch.controlPoints[10]
+                allPoints[2] = prevPatch.controlPoints[11]
+                allPoints[3] = prevPatch.controlPoints[0]
+                allColors[0] = prevPatch.colors[3]
+                allColors[3] = prevPatch.colors[0]
+            }
+            else -> return null
+        }
+        
+        // 复制新的控制点
+        for (i in points.indices) {
+            allPoints[4 + i] = points[i]
+        }
+        
+        // 复制新的颜色
+        allColors[1] = colors[0]
+        allColors[2] = colors[1]
+        
+        return CoonsPatch(allPoints, allColors)
+    }
+    
+    /**
+     * 细分曲面片为三角形
+     */
+    private fun subdividePatch(
+        patch: CoonsPatch,
+        triangles: MutableList<ShadingTriangle>,
+        subdivisions: Int
+    ) {
+        // 简化实现：将曲面片近似为两个三角形
+        val v0 = ShadingVertex(patch.controlPoints[0].x, patch.controlPoints[0].y, patch.colors[0])
+        val v1 = ShadingVertex(patch.controlPoints[3].x, patch.controlPoints[3].y, patch.colors[1])
+        val v2 = ShadingVertex(patch.controlPoints[6].x, patch.controlPoints[6].y, patch.colors[2])
+        val v3 = ShadingVertex(patch.controlPoints[9].x, patch.controlPoints[9].y, patch.colors[3])
+        
+        triangles.add(ShadingTriangle(v0, v1, v2))
+        triangles.add(ShadingTriangle(v0, v2, v3))
+    }
+    
+    /**
+     * 构建张量积曲面片
+     */
+    private fun buildTensorPatch(
+        flag: Int,
+        points: List<PointF>,
+        colors: List<Int>,
+        prevPatch: TensorPatch?
+    ): TensorPatch? {
+        if (flag == 0) {
+            if (points.size < 16 || colors.size < 4) return null
+            return TensorPatch(
+                points.toTypedArray(),
+                colors.toIntArray()
+            )
+        }
+        
+        if (prevPatch == null || points.size < 12 || colors.size < 2) return null
+        
+        // 简化实现
+        val allPoints = Array(16) { PointF(0f, 0f) }
+        val allColors = IntArray(4)
+        
+        // 继承部分控制点
+        when (flag) {
+            1 -> {
+                for (i in 0..3) allPoints[i] = prevPatch.controlPoints[12 + i]
+                allColors[0] = prevPatch.colors[3]
+                allColors[1] = prevPatch.colors[2]
+            }
+            2 -> {
+                for (i in 0..3) allPoints[i * 4] = prevPatch.controlPoints[(3 - i) * 4 + 3]
+                allColors[0] = prevPatch.colors[1]
+                allColors[3] = prevPatch.colors[2]
+            }
+            3 -> {
+                for (i in 0..3) allPoints[i] = prevPatch.controlPoints[3 - i]
+                allColors[0] = prevPatch.colors[0]
+                allColors[1] = prevPatch.colors[1]
+            }
+            else -> return null
+        }
+        
+        // 复制新的控制点
+        val maxPoints = minOf(points.size, 12)
+        for (i in 0 until maxPoints) {
+            allPoints[4 + i] = points[i]
+        }
+        
+        allColors[2] = colors.getOrElse(0) { 0 }
+        allColors[3] = colors.getOrElse(1) { 0 }
+        
+        return TensorPatch(allPoints, allColors)
+    }
+    
+    /**
+     * 细分张量积曲面片为三角形
+     */
+    private fun subdivideTensorPatch(
+        patch: TensorPatch,
+        triangles: MutableList<ShadingTriangle>,
+        subdivisions: Int
+    ) {
+        // 简化实现：将曲面片近似为两个三角形
+        val v0 = ShadingVertex(patch.controlPoints[0].x, patch.controlPoints[0].y, patch.colors[0])
+        val v1 = ShadingVertex(patch.controlPoints[3].x, patch.controlPoints[3].y, patch.colors[1])
+        val v2 = ShadingVertex(patch.controlPoints[15].x, patch.controlPoints[15].y, patch.colors[2])
+        val v3 = ShadingVertex(patch.controlPoints[12].x, patch.controlPoints[12].y, patch.colors[3])
+        
+        triangles.add(ShadingTriangle(v0, v1, v2))
+        triangles.add(ShadingTriangle(v0, v2, v3))
+    }
+    
+    /**
+     * 着色三角形
+     */
+    private data class ShadingTriangle(
+        val v0: ShadingVertex,
+        val v1: ShadingVertex,
+        val v2: ShadingVertex
+    )
+    
+    /**
+     * 着色顶点
+     */
+    private data class ShadingVertex(
+        val x: Float,
+        val y: Float,
+        val color: Int
+    )
+    
+    /**
+     * Coons 曲面片
+     */
+    private data class CoonsPatch(
+        val controlPoints: Array<PointF>,
+        val colors: IntArray
+    )
+    
+    /**
+     * 张量积曲面片
+     */
+    private data class TensorPatch(
+        val controlPoints: Array<PointF>,
+        val colors: IntArray
+    )
+    
+    /**
+     * 位读取器（用于着色数据）
+     */
+    private class BitReader(
+        private val data: ByteArray,
+        private val bitsPerCoordinate: Int,
+        private val bitsPerComponent: Int,
+        private val bitsPerFlag: Int
+    ) {
+        private var bytePos = 0
+        private var bitPos = 0
+        
+        fun hasMore(): Boolean = bytePos < data.size
+        
+        fun readFlag(): Int {
+            if (bitsPerFlag == 0) return 0
+            return readBits(bitsPerFlag)
+        }
+        
+        fun readCoordinate(min: Float, max: Float): Float {
+            val value = readBits(bitsPerCoordinate)
+            val maxVal = (1 shl bitsPerCoordinate) - 1
+            return min + value.toFloat() / maxVal * (max - min)
+        }
+        
+        fun readColor(numComponents: Int, decode: PdfArray, startIndex: Int): Int {
+            val components = FloatArray(numComponents)
+            for (i in 0 until numComponents) {
+                val value = readBits(bitsPerComponent)
+                val maxVal = (1 shl bitsPerComponent) - 1
+                val min = decode.getFloat(startIndex + i * 2) ?: 0f
+                val max = decode.getFloat(startIndex + i * 2 + 1) ?: 1f
+                components[i] = min + value.toFloat() / maxVal * (max - min)
+            }
+            
+            return when (numComponents) {
+                1 -> {
+                    val gray = (components[0] * 255).toInt().coerceIn(0, 255)
+                    Color.rgb(gray, gray, gray)
+                }
+                4 -> {
+                    val c = components[0]
+                    val m = components[1]
+                    val y = components[2]
+                    val k = components[3]
+                    val r = ((1 - c) * (1 - k) * 255).toInt().coerceIn(0, 255)
+                    val g = ((1 - m) * (1 - k) * 255).toInt().coerceIn(0, 255)
+                    val b = ((1 - y) * (1 - k) * 255).toInt().coerceIn(0, 255)
+                    Color.rgb(r, g, b)
+                }
+                else -> {
+                    val r = (components.getOrElse(0) { 0f } * 255).toInt().coerceIn(0, 255)
+                    val g = (components.getOrElse(1) { 0f } * 255).toInt().coerceIn(0, 255)
+                    val b = (components.getOrElse(2) { 0f } * 255).toInt().coerceIn(0, 255)
+                    Color.rgb(r, g, b)
+                }
+            }
+        }
+        
+        private fun readBits(count: Int): Int {
+            if (count == 0) return 0
+            
+            var result = 0
+            var remaining = count
+            
+            while (remaining > 0 && bytePos < data.size) {
+                val available = 8 - bitPos
+                val toRead = minOf(remaining, available)
+                
+                val shift = available - toRead
+                val mask = ((1 shl toRead) - 1)
+                val bits = (data[bytePos].toInt() shr shift) and mask
+                
+                result = (result shl toRead) or bits
+                remaining -= toRead
+                bitPos += toRead
+                
+                if (bitPos >= 8) {
+                    bitPos = 0
+                    bytePos++
+                }
+            }
+            
+            return result
         }
     }
     

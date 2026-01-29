@@ -46,10 +46,18 @@ class InvalidXrefException(
 ) : PdfException(message, cause)
 
 /**
- * 加密的 PDF (暂不支持)
+ * 加密的 PDF
  */
 class EncryptedPdfException(
-    message: String = "Encrypted PDF files are not supported",
+    message: String = "Encrypted PDF file",
+    cause: Throwable? = null
+) : PdfException(message, cause)
+
+/**
+ * 无效的密码
+ */
+class InvalidPasswordException(
+    message: String = "Invalid password for encrypted PDF",
     cause: Throwable? = null
 ) : PdfException(message, cause)
 

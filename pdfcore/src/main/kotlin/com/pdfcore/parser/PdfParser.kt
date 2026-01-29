@@ -1,6 +1,7 @@
 package com.pdfcore.parser
 
 import com.pdfcore.model.*
+import com.pdfcore.security.PdfEncryption
 import java.io.File
 import java.io.InputStream
 import java.io.RandomAccessFile
@@ -20,11 +21,13 @@ class PdfParser {
     private lateinit var raf: RandomAccessFile
     private var fileSize: Long = 0
     private var fileData: ByteArray? = null
+    private var password: String = ""
+    private var encryption: PdfEncryption? = null
     
     /**
      * 从文件路径解析 PDF
      */
-    fun parse(filePath: String): PdfParseResult<PdfDocument> {
+    fun parse(filePath: String, password: String = ""): PdfParseResult<PdfDocument> {
         return try {
             val file = File(filePath)
             if (!file.exists()) {
@@ -34,6 +37,7 @@ class PdfParser {
                 return PdfParseResult.failure(InvalidPdfFormatException("Cannot read file: $filePath"))
             }
             
+            this.password = password
             raf = RandomAccessFile(filePath, "r")
             fileSize = raf.length()
             
@@ -50,14 +54,17 @@ class PdfParser {
             PdfParseResult.failure(InvalidPdfFormatException("Failed to parse PDF: ${e.message}", e))
         } finally {
             try { raf.close() } catch (_: Exception) {}
+            this.password = ""
+            this.encryption = null
         }
     }
     
     /**
      * 从 InputStream 解析 PDF
      */
-    fun parse(stream: InputStream): PdfParseResult<PdfDocument> {
+    fun parse(stream: InputStream, password: String = ""): PdfParseResult<PdfDocument> {
         return try {
+            this.password = password
             fileData = stream.readBytes()
             fileSize = fileData!!.size.toLong()
             
@@ -72,14 +79,17 @@ class PdfParser {
             PdfParseResult.failure(InvalidPdfFormatException("Failed to parse PDF: ${e.message}", e))
         } finally {
             fileData = null
+            this.password = ""
+            this.encryption = null
         }
     }
     
     /**
      * 从字节数组解析 PDF
      */
-    fun parse(data: ByteArray): PdfParseResult<PdfDocument> {
+    fun parse(data: ByteArray, password: String = ""): PdfParseResult<PdfDocument> {
         return try {
+            this.password = password
             fileData = data
             fileSize = data.size.toLong()
             
@@ -94,6 +104,8 @@ class PdfParser {
             PdfParseResult.failure(InvalidPdfFormatException("Failed to parse PDF: ${e.message}", e))
         } finally {
             fileData = null
+            this.password = ""
+            this.encryption = null
         }
     }
     
@@ -111,18 +123,49 @@ class PdfParser {
         document.startXref = xrefOffset
         document.trailer = trailer
         
-        // 3. 检查是否加密
-        if (trailer["Encrypt"] != null) {
-            return PdfParseResult.failure(EncryptedPdfException())
+        // 3. 检查是否加密并设置加密处理器
+        val encryptRef = trailer["Encrypt"]
+        if (encryptRef != null) {
+            // 读取 xref 以获取 Encrypt 字典
+            val xrefEntries = mutableMapOf<String, XrefEntry>()
+            readXrefChain(xrefOffset, xrefEntries, document)
+            
+            // 获取 Encrypt 字典
+            val encryptDict = when (encryptRef) {
+                is PdfDictionary -> encryptRef
+                is PdfIndirectRef -> {
+                    val entry = xrefEntries["${encryptRef.objectNumber} ${encryptRef.generationNumber}"]
+                    if (entry is XrefEntry.InUse) {
+                        readObjectAt(entry.byteOffset.toInt()) as? PdfDictionary
+                    } else null
+                }
+                else -> null
+            }
+            
+            if (encryptDict != null) {
+                encryption = PdfEncryption.create(encryptDict, trailer, document)
+                
+                if (encryption != null && !encryption!!.authenticate(password)) {
+                    return PdfParseResult.failure(InvalidPasswordException())
+                }
+            } else {
+                return PdfParseResult.failure(EncryptedPdfException("Cannot read encryption dictionary"))
+            }
+            
+            // 重置 xref 用于完整解析
+            document.xrefEntries.addAll(xrefEntries.values)
+            
+            // 读取所有对象（带解密）
+            readAllObjectsWithDecryption(document, xrefEntries)
+        } else {
+            // 4. 读取 xref 表（包括增量更新）
+            val xrefEntries = mutableMapOf<String, XrefEntry>()
+            readXrefChain(xrefOffset, xrefEntries, document)
+            document.xrefEntries.addAll(xrefEntries.values)
+            
+            // 5. 读取所有对象
+            readAllObjects(document, xrefEntries)
         }
-        
-        // 4. 读取 xref 表（包括增量更新）
-        val xrefEntries = mutableMapOf<String, XrefEntry>()
-        readXrefChain(xrefOffset, xrefEntries, document)
-        document.xrefEntries.addAll(xrefEntries.values)
-        
-        // 5. 读取所有对象
-        readAllObjects(document, xrefEntries)
         
         return PdfParseResult.success(document)
     }
@@ -477,6 +520,103 @@ class PdfParser {
             } catch (e: Exception) {
                 // 继续处理其他流
             }
+        }
+    }
+    
+    /**
+     * 读取所有对象（带解密）
+     */
+    private fun readAllObjectsWithDecryption(document: PdfDocument, xrefEntries: Map<String, XrefEntry>) {
+        val enc = encryption ?: return readAllObjects(document, xrefEntries)
+        
+        // 读取直接存储的对象
+        val inUseEntries = xrefEntries.values.filterIsInstance<XrefEntry.InUse>()
+        for (entry in inUseEntries) {
+            try {
+                val obj = readObjectAt(entry.byteOffset.toInt())
+                if (obj != null) {
+                    // 解密对象（Encrypt 字典本身不解密）
+                    val key = "${entry.objectNumber} ${entry.generationNumber}"
+                    val encryptRef = document.trailer.getRef("Encrypt")
+                    val isEncryptDict = encryptRef != null && 
+                        encryptRef.objectNumber == entry.objectNumber && 
+                        encryptRef.generationNumber == entry.generationNumber
+                    
+                    val decryptedObj = if (isEncryptDict) {
+                        obj
+                    } else {
+                        enc.decryptObject(entry.objectNumber, entry.generationNumber, obj)
+                    }
+                    
+                    document.objects[key] = 
+                        PdfIndirectObject(entry.objectNumber, entry.generationNumber, decryptedObj)
+                }
+            } catch (e: Exception) {
+                // 继续处理其他对象
+            }
+        }
+        
+        // 读取压缩存储的对象
+        val compressedEntries = xrefEntries.values.filterIsInstance<XrefEntry.Compressed>()
+        val groupedByStream = compressedEntries.groupBy { it.objectStreamNumber }
+        
+        for ((streamObjNum, entries) in groupedByStream) {
+            try {
+                readObjectsFromStreamWithDecryption(document, streamObjNum, entries, enc)
+            } catch (e: Exception) {
+                // 继续处理其他流
+            }
+        }
+    }
+    
+    /**
+     * 从 Object Stream 读取对象（带解密）
+     */
+    private fun readObjectsFromStreamWithDecryption(
+        document: PdfDocument,
+        streamObjNum: Int,
+        entries: List<XrefEntry.Compressed>,
+        enc: PdfEncryption
+    ) {
+        val streamObj = document.objects["$streamObjNum 0"]?.obj as? PdfStream ?: return
+        val dict = streamObj.dict
+        
+        // 验证类型
+        if (dict.getNameValue("Type") != "ObjStm") return
+        
+        // 获取参数
+        val n = dict.getInt("N") ?: return
+        val first = dict.getInt("First") ?: return
+        
+        // 解码流（Object Stream 的内容已经在流级别解密了）
+        val decodedData = decodeStream(streamObj)
+        val content = String(decodedData, Charsets.ISO_8859_1)
+        
+        // 解析头部：N 对 (objNum offset)
+        val headerLexer = PdfLexer(content)
+        val objOffsets = mutableListOf<Pair<Int, Int>>()
+        
+        for (i in 0 until n) {
+            val objNum = (headerLexer.nextObject() as? PdfNumber)?.toInt() ?: break
+            val offset = (headerLexer.nextObject() as? PdfNumber)?.toInt() ?: break
+            objOffsets.add(objNum to offset)
+        }
+        
+        // 读取请求的对象
+        for (entry in entries) {
+            val objInfo = objOffsets.find { it.first == entry.objectNumber } ?: continue
+            val objOffset = first + objInfo.second
+            
+            if (objOffset >= content.length) continue
+            
+            val objContent = content.substring(objOffset)
+            val lexer = PdfLexer(objContent)
+            val obj = lexer.nextObject() ?: continue
+            
+            // Object Stream 中的对象不需要单独解密
+            // 因为整个流已经被解密了
+            document.objects["${entry.objectNumber} 0"] = 
+                PdfIndirectObject(entry.objectNumber, 0, obj)
         }
     }
     

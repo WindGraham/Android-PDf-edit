@@ -383,12 +383,12 @@ class FontHandler(private val document: PdfDocument) {
      */
     private fun decodeStream(stream: PdfStream): ByteArray {
         val filters = stream.getFilters()
-        if (filters.isNullOrEmpty()) return stream.data
+        if (filters.isEmpty()) return stream.rawData
         
-        var data = stream.data
+        var data = stream.rawData
         for ((index, filter) in filters.withIndex()) {
             val params = stream.getDecodeParams(index)
-            data = StreamFilters.decode(data, filter.name, params)
+            data = StreamFilters.decode(data, filter, params)
         }
         return data
     }
